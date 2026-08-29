@@ -1,0 +1,28 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+.env/
+
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Installer / pip artifacts
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
