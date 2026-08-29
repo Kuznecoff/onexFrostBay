@@ -205,6 +205,8 @@ class FrostbayTrayApp:
             items.append(pystray.MenuItem("Smart: Silent", self._on_smart("silent")))
             items.append(pystray.MenuItem("Smart: Soft", self._on_smart("soft")))
             items.append(pystray.MenuItem("Smart: Strong", self._on_smart("strong")))
+            items.append(pystray.MenuItem("Fixed Fan 0% / Pump 80%", self._on_fixed(0, 80)))
+            items.append(pystray.MenuItem("Fixed Fan 30% / Pump 80%", self._on_fixed(30, 80)))
             items.append(pystray.MenuItem("Fixed Fan 50% / Pump 80%", self._on_fixed(50, 80)))
             items.append(pystray.MenuItem("Fixed Fan 100% / Pump 100%", self._on_fixed(100, 100)))
             items.append(pystray.MenuItem("Pump -> 80%", self._on_pump(80)))

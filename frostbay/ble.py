@@ -77,7 +77,15 @@ class FrostbayBLE:
         self._on_state = on_state
         self._lock = asyncio.Lock()
         self._connected = False
+        # Whether FFE1 writes must use write-WITH-response. Detected from the
+        # characteristic's advertised properties at connect time; some stacks
+        # (macOS CoreBluetooth) silently drop WRITE_COMMAND to a char that only
+        # declares WRITE, which made commands appear to do nothing.
+        self._write_with_response = True
         self._stop_notifications = None
+        # Strong references to in-flight notification-triggered refresh tasks,
+        # so they are not garbage-collected before completion.
+        self._notify_tasks: set[asyncio.Task] = set()
         self._poll_task: Optional[asyncio.Task] = None
         self._poll_interval = 2.0
         self._poll_stop: Optional[asyncio.Event] = None
@@ -186,12 +194,27 @@ class FrostbayBLE:
     async def _resolve_chars(self) -> None:
         if self._client is None:
             raise RuntimeError("Client not connected")
-        await self._client.get_services()
+        # bleak >= 3.0 performs service discovery during connect(); the
+        # `.services` property is populated right after, so no explicit
+        # get_services() call is needed (it was removed in bleak 3.x).
         ffe1 = self._find_char(UUID_FFE1)
         if ffe1 is None:
             raise RuntimeError(f"Characteristic {UUID_FFE1} not found on the device")
         self._ffe1 = ffe1
         self._ffe4 = self._find_char(UUID_FFE4)
+        # Pick a write mode the characteristic actually advertises. If it only
+        # supports WRITE (with response), sending WRITE_COMMAND is dropped by
+        # CoreBluetooth and commands never reach the device.
+        try:
+            props = set(self._ffe1.properties or [])
+        except Exception:
+            props = set()
+        self._write_with_response = "write" in props and "write-without-response" not in props
+        logger.info(
+            "FFE1 properties=%s -> write with response=%s",
+            sorted(props) if props else "?",
+            self._write_with_response,
+        )
         logger.debug("Resolved FFE1=%s FFE4=%s", bool(self._ffe1), bool(self._ffe4))
 
     def _find_char(self, uuid: str) -> Optional[BleakGATTCharacteristic]:
@@ -206,10 +229,23 @@ class FrostbayBLE:
     async def _start_notifications(self) -> None:
         if self._ffe4 is None:
             return
+
+        async def _safe_refresh() -> None:
+            try:
+                await self.refresh_state()
+            except Exception as exc:
+                logger.debug("Notification-triggered refresh failed: %s", exc)
+
         async def _handler(sender, data: bytearray) -> None:
             logger.debug("Notification from %s: %d bytes", sender, len(data))
             # Notifications from FFE4 may indicate a state change; refresh FFE1.
-            await asyncio.create_task(self.refresh_state())
+            # Run in the background (bleak does not await handlers); keep a
+            # reference so the task is not garbage-collected mid-flight and
+            # its exceptions are always consumed by _safe_refresh.
+            task = asyncio.create_task(_safe_refresh())
+            self._notify_tasks.add(task)
+            task.add_done_callback(self._notify_tasks.discard)
+
         try:
             await self._client.start_notify(self._ffe4, _handler)
             self._stop_notifications = lambda: self._client and self._client.stop_notify(self._ffe4)
@@ -225,7 +261,8 @@ class FrostbayBLE:
             self._stop_notifications = None
 
     # --- core read / write ---------------------------------------------
-    async def read_state(self) -> FrostbayState:
+    async def _read_state_locked(self) -> FrostbayState:
+        """Read FFE1. Caller must hold ``self._lock``."""
         if self._ffe1 is None:
             raise RuntimeError("Not connected or FFE1 not resolved")
         data = await self._client.read_gatt_char(self._ffe1)
@@ -238,16 +275,43 @@ class FrostbayBLE:
                 logger.warning("on_state callback error: %s", exc)
         return state
 
-    async def write_state(self, state: bytearray) -> None:
+    async def read_state(self) -> FrostbayState:
+        # Serialize all GATT traffic: CoreBluetooth cannot handle two
+        # concurrent reads of the same characteristic (TimeoutError /
+        # KeyError from PeripheralDelegate). The poll loop, notification
+        # handler and UI refresh all funnel through here.
+        async with self._lock:
+            return await self._read_state_locked()
+
+    async def _write_state_locked(self, state: bytearray) -> None:
+        """Write FFE1 in chunks. Caller must hold ``self._lock``."""
         if self._ffe1 is None:
             raise RuntimeError("Not connected or FFE1 not resolved")
         chunks = encode_write_chunks(state)
         for idx, chunk in enumerate(chunks):
-            logger.debug("Write chunk %d: %s", idx + 1, chunk.hex())
-            await self._client.write_gatt_char(self._ffe1, chunk, response=False)
+            logger.info(
+                "Write chunk %d (%d bytes, response=%s): %s",
+                idx + 1, len(chunk), self._write_with_response, chunk.hex(),
+            )
+            try:
+                await self._client.write_gatt_char(self._ffe1, chunk, response=self._write_with_response)
+            except Exception as exc:
+                # Fallback to the other write mode in case property detection
+                # was wrong; re-raise if both fail.
+                logger.warning(
+                    "Write with response=%s failed (%s); retrying with the other mode",
+                    self._write_with_response, exc,
+                )
+                await self._client.write_gatt_char(self._ffe1, chunk, response=not self._write_with_response)
+                # Stick with whichever mode actually worked for remaining chunks.
+                self._write_with_response = not self._write_with_response
             if idx < len(chunks) - 1:
                 await asyncio.sleep(WRITE_DELAY_SEC)
         await asyncio.sleep(READBACK_DELAY_SEC)
+
+    async def write_state(self, state: bytearray) -> None:
+        async with self._lock:
+            await self._write_state_locked(state)
 
     async def refresh_state(self) -> FrostbayState:
         return await self.read_state()
@@ -297,24 +361,24 @@ class FrostbayBLE:
     # --- high-level commands ------------------------------------------
     async def set_off(self) -> FrostbayState:
         async with self._lock:
-            current = await self.read_state()
-            await self.write_state(build_off(bytes(current.raw)))
-            return await self.read_state()
+            current = await self._read_state_locked()
+            await self._write_state_locked(build_off(bytes(current.raw)))
+            return await self._read_state_locked()
 
     async def set_smart(self, preset: str, pump_percent: Optional[int] = None) -> FrostbayState:
         async with self._lock:
-            current = await self.read_state()
-            await self.write_state(build_smart(bytes(current.raw), preset, pump_percent))
-            return await self.read_state()
+            current = await self._read_state_locked()
+            await self._write_state_locked(build_smart(bytes(current.raw), preset, pump_percent))
+            return await self._read_state_locked()
 
     async def set_fixed(self, fan_percent: int, pump_percent: int) -> FrostbayState:
         async with self._lock:
-            current = await self.read_state()
-            await self.write_state(build_fixed(bytes(current.raw), fan_percent, pump_percent))
-            return await self.read_state()
+            current = await self._read_state_locked()
+            await self._write_state_locked(build_fixed(bytes(current.raw), fan_percent, pump_percent))
+            return await self._read_state_locked()
 
     async def set_pump(self, pump_percent: int) -> FrostbayState:
         async with self._lock:
-            current = await self.read_state()
-            await self.write_state(build_set_pump(bytes(current.raw), pump_percent))
-            return await self.read_state()
+            current = await self._read_state_locked()
+            await self._write_state_locked(build_set_pump(bytes(current.raw), pump_percent))
+            return await self._read_state_locked()
