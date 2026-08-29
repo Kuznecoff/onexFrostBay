@@ -27,6 +27,7 @@ import threading
 from typing import Optional
 
 from .ble import FrostbayBLE, ScanResult, FROSTBAY_NAME_PART, is_frostbay_name
+from .history import History
 from .icons import IconState, render_icon
 from .protocol import FrostbayState, Mode, SMART_CURVES
 
@@ -51,11 +52,32 @@ def _icon_image(state: IconState) -> PILImage.Image:
     return PILImage.open(io.BytesIO(render_icon(state)))
 
 
-def _format_state_text(s: Optional[FrostbayState]) -> str:
+def _spark(values, lo=None, hi=None, width=20) -> str:
+    bars = "▁▂▃▄▅▆▇█"
+    if not values:
+        return " " * width
+    vals = list(values)[-width:]
+    if lo is None:
+        lo = min(vals)
+    if hi is None:
+        hi = max(vals)
+    if hi <= lo:
+        hi = lo + 1.0
+    out = []
+    for v in vals:
+        frac = max(0.0, min(1.0, (v - lo) / (hi - lo)))
+        out.append(bars[min(len(bars) - 1, int(frac * len(bars)))])
+    pad = width - len(out)
+    if pad > 0:
+        out = [" "] * pad + out
+    return "".join(out[-width:])
+
+
+def _format_state_text(s: Optional[FrostbayState], history: Optional[History] = None) -> str:
     if s is None:
         return "No state available."
     running = "yes" if s.is_running() else "no"
-    return (
+    base = (
         f"Mode:      {s.mode.label}\n"
         f"Running:   {running}\n"
         f"Fan:       {s.fan_percent} %\n"
@@ -65,6 +87,16 @@ def _format_state_text(s: Optional[FrostbayState]) -> str:
         f"Temp out:  {s.temp_out_c} C\n"
         f"Protocol:  0x{s.protocol_version:02X}"
     )
+    if history is not None and history.last() is not None:
+        base += (
+            "\n──────────────────────"
+            f"\nTemp in  {_spark(history.series('temp_in'))}"
+            f"\nTemp out {_spark(history.series('temp_out'))}"
+            f"\nFlow     {_spark(history.series('flow'))}"
+            f"\nFan %    {_spark(history.series('fan'), 0, 100)}"
+            f"\nPump %   {_spark(history.series('pump'), 0, 100)}"
+        )
+    return base
 
 
 # --- main application -------------------------------------------------------
@@ -79,6 +111,7 @@ class FrostbayTrayApp:
         self._thread: Optional[threading.Thread] = None
         self._icon: Optional[pystray.Icon] = None
         self._last_state: Optional[FrostbayState] = None
+        self._history = History()
         self._scan_results: list[ScanResult] = []
         self._stop_event = asyncio.Event()
 
@@ -119,6 +152,7 @@ class FrostbayTrayApp:
 
     def _on_state_cb(self, state: FrostbayState) -> None:
         self._last_state = state
+        self._history.push(state)
         self._update_icon(IconState.CONNECTED)
         self._refresh_menu()
 
@@ -144,7 +178,7 @@ class FrostbayTrayApp:
     def _build_menu(self) -> pystray.Menu:
         connected = bool(self._ble and self._ble.is_connected)
         status = "Connected" if connected else ("Idle" if not self._scan_results else "Disconnected")
-        info = _format_state_text(self._last_state if connected else None)
+        info = _format_state_text(self._last_state if connected else None, self._history if connected else None)
 
         items: list[pystray.MenuItem] = []
         items.append(pystray.MenuItem(f"Status: {status}", None, enabled=False))
@@ -162,6 +196,8 @@ class FrostbayTrayApp:
 
         items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem("Refresh state", self._on_refresh))
+        if connected:
+            items.append(pystray.MenuItem("Live dashboard...", self._on_dashboard))
 
         if connected:
             items.append(pystray.Menu.SEPARATOR)
@@ -240,6 +276,22 @@ class FrostbayTrayApp:
             self._update_icon(IconState.ERROR)
         self._refresh_menu()
 
+    async def _do_dashboard(self) -> None:
+        if self._ble is None or not self._ble.is_connected:
+            logger.warning("Not connected; dashboard unavailable.")
+            return
+        from .dashboard import run_dashboard
+        try:
+            await self._ble.start_polling(interval=1.0)
+            await run_dashboard(self._history, poll_interval=1.0, use_curses=True)
+        except Exception as exc:
+            logger.error("Dashboard failed: %s", exc)
+        finally:
+            try:
+                await self._ble.stop_polling()
+            except Exception:
+                pass
+
     async def _do_off(self) -> None:
         await self._command(self._ble.set_off())
 
@@ -278,6 +330,9 @@ class FrostbayTrayApp:
 
     def _on_refresh(self, icon) -> None:
         self._schedule(self._do_refresh())
+
+    def _on_dashboard(self, icon) -> None:
+        self._schedule(self._do_dashboard())
 
     def _on_off(self, icon) -> None:
         self._schedule(self._do_off())

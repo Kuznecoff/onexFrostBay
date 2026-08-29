@@ -31,6 +31,15 @@ Tested targets: **Windows 10/11**, **macOS**, **Fedora Linux**.
   - flow rate (mL/min, decoded from `state[6..7]`)
   - pump percentage
   - input / output water temperatures
+- **Live auto-refresh**: after connecting, the device is polled automatically
+  (default every 2 s) and the dashboard/menu reflects the latest parameters
+  without manual refresh. Polling is also started while the **Live dashboard**
+  view is open (every 1 s).
+- **Live dashboard with graphs**: a rolling real-time view of temperatures,
+  flow rate, fan % and pump % with unicode sparkline time-series. Available
+  both from the tray menu (`Live dashboard…`) and the console menu (`6)`).
+- Pretty state block with inline sparklines in both the tray tooltip and the
+  console status line, so you can see trends at a glance.
 - Sends control commands using the verified 3-chunk `1C/2C/3C` transport:
   - **Turn OFF**
   - **Smart Fan**: `silent`, `soft`, `strong` presets
@@ -110,11 +119,15 @@ onexFrostBay/
 ├── specification.md          # Frostbay BLE protocol reference
 ├── requirements.txt
 ├── README.md
+├── .gitignore
 └── frostbay/
     ├── __init__.py
     ├── __main__.py           # entry point for `python -m frostbay`
     ├── protocol.py           # FFE1 state blob parser + command builders
-    ├── ble.py                # bleak-based cross-platform BLE client
+    ├── ble.py                # bleak-based cross-platform BLE client + auto-polling
+    ├── history.py            # ring-buffer telemetry history for graphs
+    ├── dashboard.py          # live curses/text dashboard with sparkline graphs
+    ├── console.py            # interactive console controller (WSL / no-tray)
     ├── icons.py              # PIL tray-icon rendering (per-state color)
     └── app.py                # pystray tray menu + asyncio bridge
 ```

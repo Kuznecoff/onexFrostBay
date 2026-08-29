@@ -78,6 +78,9 @@ class FrostbayBLE:
         self._lock = asyncio.Lock()
         self._connected = False
         self._stop_notifications = None
+        self._poll_task: Optional[asyncio.Task] = None
+        self._poll_interval = 2.0
+        self._poll_stop: Optional[asyncio.Event] = None
 
     # --- status ---------------------------------------------------------
     @property
@@ -153,8 +156,17 @@ class FrostbayBLE:
             await self._start_notifications()
         except Exception as exc:
             logger.warning("Notification subscription failed: %s", exc)
+        # Start background auto-polling for live parameter updates.
+        try:
+            await self.start_polling(interval=self._poll_interval)
+        except Exception as exc:
+            logger.warning("Auto-polling start failed: %s", exc)
 
     async def disconnect(self) -> None:
+        try:
+            await self.stop_polling()
+        except Exception:
+            pass
         if self._client is None:
             self._connected = False
             return
@@ -239,6 +251,48 @@ class FrostbayBLE:
 
     async def refresh_state(self) -> FrostbayState:
         return await self.read_state()
+
+    # --- auto-polling ---------------------------------------------------
+    async def start_polling(self, interval: float = 2.0) -> None:
+        """Start a background loop that periodically reads the state.
+
+        Each tick calls ``on_state`` (if provided) with the fresh
+        :class:`FrostbayState`, so a UI can render live-updating parameters
+        such as temperatures and flow rate without manual refresh.
+        """
+        await self.stop_polling()
+        self._poll_interval = float(interval)
+        self._poll_stop = asyncio.Event()
+        self._poll_task = asyncio.create_task(self._poll_loop())
+        logger.info("Auto-polling started (%.1fs)", self._poll_interval)
+
+    async def stop_polling(self) -> None:
+        if self._poll_stop is not None:
+            self._poll_stop.set()
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._poll_task = None
+        self._poll_stop = None
+        logger.debug("Auto-polling stopped")
+
+    async def _poll_loop(self) -> None:
+        assert self._poll_stop is not None
+        while not self._poll_stop.is_set():
+            try:
+                if self.is_connected and self._ffe1 is not None:
+                    await self.read_state()
+            except Exception as exc:
+                logger.debug("Poll tick error: %s", exc)
+            try:
+                await asyncio.wait_for(self._poll_stop.wait(), timeout=self._poll_interval)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
 
     # --- high-level commands ------------------------------------------
     async def set_off(self) -> FrostbayState:
