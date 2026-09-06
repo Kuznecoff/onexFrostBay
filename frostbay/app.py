@@ -533,6 +533,11 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if "--version" in sys.argv or "-V" in sys.argv:
+        from . import __version__
+
+        print(f"Frostbay {__version__}")
+        return 0
     # Local import to avoid pulling console deps when tray is used.
     from .console import run_console
 

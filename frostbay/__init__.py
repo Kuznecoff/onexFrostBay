@@ -1,5 +1,7 @@
 """Frostbay BLE tray application package."""
 
+__version__ = "0.2.0"
+
 from .protocol import (
     FrostbayState,
     Mode,
@@ -17,6 +19,7 @@ from .console import FrostbayConsole, run_console
 from .dashboard import run_dashboard, render_once
 
 __all__ = [
+    "__version__",
     "FrostbayState",
     "Mode",
     "SMART_CURVES",

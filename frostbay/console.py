@@ -34,8 +34,10 @@ logger = logging.getLogger("frostbay.console")
 
 
 def _banner() -> str:
+    from . import __version__
+
     return (
-        "\n=== Frostbay console controller ===\n"
+        f"\n=== Frostbay {__version__} console controller ===\n"
         f"Auto-discovery name substring: *{FROSTBAY_NAME_PART}* (case-insensitive)\n"
     )
 
