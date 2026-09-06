@@ -46,7 +46,34 @@ Tested targets: **Windows 10/11**, **macOS**, **Fedora Linux**.
   - **Fixed Fan** with custom fan % and pump %
   - **Pump speed** control (clamped to the supported `50..100` range)
 
-## Install
+## Quick start (one command)
+
+```bash
+git clone https://github.com/Kuznecoff/onexFrostBay.git
+cd onexFrostBay
+./run.sh
+```
+
+`run.sh` creates the virtual environment and installs dependencies on first
+run, then starts the app. Pass-through arguments work as usual:
+`./run.sh --address <MAC>`, `./run.sh --no-tray`, etc.
+
+### Fedora installer
+
+`install.sh` additionally sets up the system for a desktop user:
+
+```bash
+./install.sh                # system packages + venv + apps-menu entry, asks about autostart
+./install.sh --autostart    # also start Frostbay on login
+./install.sh --no-autostart
+```
+
+It installs `bluez`/python packages (sudo), creates the venv, adds a
+**Frostbay** entry to the applications menu and can enable autostart.
+On GNOME also enable the *AppIndicator and KStatusNotifierItem Support*
+extension if the tray icon does not appear (KDE works out of the box).
+
+## Install (manual)
 
 ```bash
 python -m venv .venv
