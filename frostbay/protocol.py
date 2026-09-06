@@ -201,9 +201,17 @@ def _clamp_percent(value: int, lo: int = 0, hi: int = 100) -> int:
     return max(lo, min(hi, int(value)))
 
 
+# Pump control range. The spec documents a *supported* range of 50..100 (with
+# 80..100 recommended for real hardware), but we let the user pick any value in
+# 0..100 so low-flow settings are selectable; the tray's auto-restart-on-stop
+# feature covers the risk of a pump stopping at very low flow.
+PUMP_MIN_PERCENT = 0
+PUMP_MAX_PERCENT = 100
+
+
 def _clamp_pump(value: int) -> int:
-    """Pump is supported in 50..100; clamp into that range."""
-    return _clamp_percent(value, 50, 100)
+    """Clamp the requested pump percentage into the selectable range."""
+    return _clamp_percent(value, PUMP_MIN_PERCENT, PUMP_MAX_PERCENT)
 
 
 def _clamp_percent_byte(value: int) -> int:

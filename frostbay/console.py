@@ -27,6 +27,7 @@ from typing import Optional
 
 from .ble import FrostbayBLE, FROSTBAY_NAME_PART, is_frostbay_name
 from .history import History
+from .host import get_host_stats, format_cpu, format_gpu
 from .protocol import FrostbayState
 
 logger = logging.getLogger("frostbay.console")
@@ -95,6 +96,8 @@ def _print_state(s: Optional[FrostbayState], history: Optional[History] = None) 
     print(f"  │ Status   {running:<6}   Mode  {s.mode.label:<11} proto 0x{s.protocol_version:02X} │")
     print(f"  │ Fan  {s.fan_percent:>3}%   Pump {s.pump_percent:>3}%   Flow {s.flow_ml_min:>6.1f} mL/min │")
     print(f"  │ Temp in  {s.temp_in_c:>3}C    Temp out {s.temp_out_c:>3}C              │")
+    print(f"  │ CPU {format_cpu(get_host_stats()):<42}│")
+    print(f"  │ GPU {format_gpu(get_host_stats()):<42}│")
     if history is not None and history.last() is not None:
         t0, t1 = float(s.temp_in_c), float(s.temp_out_c)
         sp_in = _spark(history.series('temp_in'))

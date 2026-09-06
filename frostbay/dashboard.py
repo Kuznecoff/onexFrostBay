@@ -19,6 +19,7 @@ import time
 from typing import Optional
 
 from .history import History, Sample
+from .host import get_host_stats, format_cpu, format_gpu
 from .protocol import FrostbayState
 
 
@@ -71,6 +72,10 @@ def render_text(h: History, width: int = 72) -> str:
 
     status = "● RUNNING" if s.running else "○ stopped"
     lines.append(f"  Status: {status}    Fan: {s.fan_percent:5.0f}%    Pump: {s.pump_percent:5.0f}%")
+    cpu = format_cpu(get_host_stats())
+    gpu = format_gpu(get_host_stats())
+    lines.append(f"  CPU       {cpu}")
+    lines.append(f"  GPU       {gpu}")
     lines.append("")
     temp_lo, temp_hi = _auto_range(h.temp_in, h.temp_out, margin=2)
     flow_lo, flow_hi = _auto_range(h.flow, margin=10)
@@ -135,6 +140,13 @@ def _run_curses(h: History, stop_event: asyncio.Event, poll_interval: float) -> 
                     sp = sparkline(series, max(10, w_screen - 28), lo, hi)
                     stdscr.addstr(row, 26, sp)
                     row += 2
+                # Host CPU/GPU telemetry (no sparkline — single live value each).
+                cpu = format_cpu(get_host_stats())
+                gpu = format_gpu(get_host_stats())
+                stdscr.addstr(row, 2, f"CPU       {cpu}")
+                row += 1
+                stdscr.addstr(row, 2, f"GPU       {gpu}")
+                row += 1
                 stdscr.addstr(min(h_screen - 2, row + 2), 2, f"1) refresh  2) OFF  3) smart 4) fixed 0) exit  (poll {poll_interval:.1f}s)")
                 stdscr.refresh()
                 _sleep(stop_event, poll_interval)

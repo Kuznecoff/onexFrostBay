@@ -24,10 +24,12 @@ import asyncio
 import logging
 import sys
 import threading
+import time
 from typing import Optional
 
 from .ble import FrostbayBLE, ScanResult, FROSTBAY_NAME_PART, is_frostbay_name
 from .history import History
+from .host import get_host_stats, format_cpu, format_gpu
 from .icons import IconState, render_icon
 from .protocol import FrostbayState, Mode, SMART_CURVES
 
@@ -42,6 +44,15 @@ except ImportError:  # pragma: no cover - optional for console-only mode
 
 
 logger = logging.getLogger("frostbay.app")
+
+# When the pump is in FIXED (manual) mode and reports it has stopped, auto-restart
+# re-applies the fixed settings to wake it back up. This works regardless of the
+# set pump value -- any stop at any setting triggers a restart attempt.
+
+# Minimum seconds between auto-restart attempts. The polling callback fires every
+# ~2s, so this cooldown stops us from hammering the device on every tick while a
+# stopped pump is reported repeatedly.
+AUTO_RESTART_COOLDOWN_SEC = 10.0
 
 
 # --- helpers ----------------------------------------------------------------
@@ -73,30 +84,50 @@ def _spark(values, lo=None, hi=None, width=20) -> str:
     return "".join(out[-width:])
 
 
-def _format_state_text(s: Optional[FrostbayState], history: Optional[History] = None) -> str:
+# Native menus on Windows and Linux (GTK/AppIndicator) do not wrap item text, so
+# long status lines make the menu overflow the screen there. macOS renders tray
+# menu titles fine on one line, so it keeps the compact single-line layout.
+_IS_WINDOWS = sys.platform == "win32"
+_NEEDS_SHORT_MENU_LINES = _IS_WINDOWS or sys.platform.startswith("linux")
+
+
+def _format_state_lines(s: Optional[FrostbayState], history: Optional[History] = None) -> list[str]:
+    """Status text (no sparklines) for the tray menu, as one or more short lines.
+
+    Windows/Linux native menus cannot wrap item text and strip embedded newlines,
+    so a single long line makes the whole context menu wider than the screen
+    there. On those platforms we split the state into several compact menu lines;
+    macOS keeps the original single-line layout.
+    """
     if s is None:
-        return "No state available."
-    running = "yes" if s.is_running() else "no"
-    base = (
-        f"Mode:      {s.mode.label}\n"
-        f"Running:   {running}\n"
-        f"Fan:       {s.fan_percent} %\n"
-        f"Flow:      {s.flow_ml_min:.1f} mL/min\n"
-        f"Pump:      {s.pump_percent} %\n"
-        f"Temp in:   {s.temp_in_c} C\n"
-        f"Temp out:  {s.temp_out_c} C\n"
-        f"Protocol:  0x{s.protocol_version:02X}"
-    )
-    if history is not None and history.last() is not None:
-        base += (
-            "\n──────────────────────"
-            f"\nTemp in  {_spark(history.series('temp_in'))}"
-            f"\nTemp out {_spark(history.series('temp_out'))}"
-            f"\nFlow     {_spark(history.series('flow'))}"
-            f"\nFan %    {_spark(history.series('fan'), 0, 100)}"
-            f"\nPump %   {_spark(history.series('pump'), 0, 100)}"
-        )
-    return base
+        return ["No state available."]
+    running = "Running" if s.is_running() else "Stopped"
+    if not _NEEDS_SHORT_MENU_LINES:
+        temp_in = f"In {s.temp_in_c}°" if s.temp_in_c else ""
+        temp_out = f"Out {s.temp_out_c}°" if s.temp_out_c else ""
+        parts = [
+            s.mode.label,
+            running,
+            f"Fan {s.fan_percent}%",
+            f"{s.flow_ml_min:.0f}",
+            f"Pump {s.pump_percent}%",
+        ]
+        if temp_in:
+            parts.append(temp_in)
+        if temp_out:
+            parts.append(temp_out)
+        return ["  ·  ".join(parts)]
+    # Windows: keep every line short enough to fit the menu on screen.
+    lines = [f"{s.mode.label} - {running}"]
+    lines.append(f"Fan {s.fan_percent}%  Pump {s.pump_percent}%  Flow {s.flow_ml_min:.0f}")
+    temps = []
+    if s.temp_in_c:
+        temps.append(f"In {s.temp_in_c}°")
+    if s.temp_out_c:
+        temps.append(f"Out {s.temp_out_c}°")
+    if temps:
+        lines.append("  ".join(temps))
+    return lines
 
 
 # --- main application -------------------------------------------------------
@@ -114,6 +145,11 @@ class FrostbayTrayApp:
         self._history = History()
         self._scan_results: list[ScanResult] = []
         self._stop_event = asyncio.Event()
+        # Monotonic timestamp of the last auto-restart attempt (see _maybe_auto_restart).
+        # Start at 0 so the first detected stop always triggers an immediate restart.
+        self._last_auto_restart_ts = 0.0
+        # Auto-restart is opt-in via a menu checkbox (see _on_toggle_auto_restart).
+        self._auto_restart_enabled = True
 
     # ---- asyncio loop runner ----
     def _run_loop(self) -> None:
@@ -155,6 +191,43 @@ class FrostbayTrayApp:
         self._history.push(state)
         self._update_icon(IconState.CONNECTED)
         self._refresh_menu()
+        # Auto-restart: only when the user has enabled it via the menu checkbox, we
+        # are in FIXED (manual) mode and the device reports it has stopped. Re-apply
+        # the fixed settings to wake the pump back up. Runs inside the event loop
+        # (polling callback), so schedule directly; cooldown prevents spamming every
+        # poll tick. Works regardless of the chosen fan/pump values.
+        if self._auto_restart_enabled and self._should_auto_restart(state):
+            self._maybe_auto_restart()
+
+    @staticmethod
+    def _should_auto_restart(state: FrostbayState) -> bool:
+        """True when the pump is in FIXED (manual) mode and currently stopped.
+
+        Works regardless of the set fan/pump values -- any stop at any setting
+        triggers a restart attempt (when enabled via the menu checkbox).
+        """
+        return state.mode == Mode.FIXED and not state.is_running()
+
+    def _on_toggle_auto_restart(self, icon) -> None:
+        """Toggle the auto-restart checkbox in the tray menu."""
+        self._auto_restart_enabled = not self._auto_restart_enabled
+        logger.info("Auto-restart %s", "enabled" if self._auto_restart_enabled else "disabled")
+        self._refresh_menu()
+
+    def _maybe_auto_restart(self) -> None:
+        """Re-apply fixed settings if the cooldown has elapsed since last attempt."""
+        now = time.monotonic()
+        if now - self._last_auto_restart_ts < AUTO_RESTART_COOLDOWN_SEC:
+            return
+        self._last_auto_restart_ts = now
+        state = self._last_state
+        if state is None:
+            return
+        logger.info(
+            "Pump stopped in manual mode; re-applying fixed settings to wake it.",
+        )
+        # Schedule inside the loop; _do_fixed sends set_fixed(fan, pump).
+        asyncio.create_task(self._do_fixed(state.fan_percent, state.pump_percent))
 
     # ---- icon / menu ----
     def _update_icon(self, state: IconState) -> None:
@@ -178,11 +251,23 @@ class FrostbayTrayApp:
     def _build_menu(self) -> pystray.Menu:
         connected = bool(self._ble and self._ble.is_connected)
         status = "Connected" if connected else ("Idle" if not self._scan_results else "Disconnected")
-        info = _format_state_text(self._last_state if connected else None, self._history if connected else None)
+        info_lines = _format_state_lines(self._last_state if connected else None, self._history if connected else None)
 
         items: list[pystray.MenuItem] = []
         items.append(pystray.MenuItem(f"Status: {status}", None, enabled=False))
-        items.append(pystray.MenuItem(info, None, enabled=False))
+        # One menu item per status line: on Windows each line is kept short so the
+        # native menu never grows wider than the screen.
+        for line in info_lines:
+            items.append(pystray.MenuItem(line, None, enabled=False))
+
+        # Host CPU / GPU telemetry as their own lines so they render reliably in the
+        # tray menu (a single multiline item can be truncated by some native menus).
+        host = get_host_stats()
+        cpu_line = f"CPU:       {format_cpu(host)}"
+        gpu_line = f"GPU:       {format_gpu(host)}"
+        items.append(pystray.MenuItem(cpu_line, None, enabled=False))
+        items.append(pystray.MenuItem(gpu_line, None, enabled=False))
+
         items.append(pystray.Menu.SEPARATOR)
 
         # Scan
@@ -205,12 +290,27 @@ class FrostbayTrayApp:
             items.append(pystray.MenuItem("Smart: Silent", self._on_smart("silent")))
             items.append(pystray.MenuItem("Smart: Soft", self._on_smart("soft")))
             items.append(pystray.MenuItem("Smart: Strong", self._on_smart("strong")))
-            items.append(pystray.MenuItem("Fixed Fan 0% / Pump 80%", self._on_fixed(0, 80)))
-            items.append(pystray.MenuItem("Fixed Fan 30% / Pump 80%", self._on_fixed(30, 80)))
-            items.append(pystray.MenuItem("Fixed Fan 50% / Pump 80%", self._on_fixed(50, 80)))
-            items.append(pystray.MenuItem("Fixed Fan 100% / Pump 100%", self._on_fixed(100, 100)))
-            items.append(pystray.MenuItem("Pump -> 80%", self._on_pump(80)))
-            items.append(pystray.MenuItem("Pump -> 100%", self._on_pump(100)))
+
+            # Manual fixed settings via a nested dropdown menu. Selecting a fan or
+            # pump value applies both parameters at once through _on_fixed(x, y):
+            # the chosen value is paired with the current value of the other param.
+            items.append(pystray.Menu.SEPARATOR)
+            # Auto-restart checkbox: when checked, the app re-applies fixed settings
+            # whenever a stopped pump is detected in manual mode. Toggled via handler.
+            items.append(pystray.MenuItem(
+                "Auto-restart on stop",
+                self._on_toggle_auto_restart,
+                checked=lambda _: self._auto_restart_enabled,
+            ))
+
+            items.append(pystray.Menu.SEPARATOR)
+            items.append(pystray.MenuItem(
+                "Manual settings",
+                pystray.Menu(
+                    pystray.MenuItem("Fan speed", self._build_speed_menu("fan")),
+                    pystray.MenuItem("Pump speed", self._build_speed_menu("pump")),
+                ),
+            ))
 
         items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem("Exit", self._on_exit))
@@ -353,6 +453,43 @@ class FrostbayTrayApp:
         def handler(icon) -> None:
             self._schedule(self._do_pump(pump))
         return handler
+
+    # ---- manual fixed settings (nested dropdown menu) ----
+    @staticmethod
+    def _speed_choices() -> list[int]:
+        """Percentage steps offered in the fan/pump speed submenus."""
+        return list(range(0, 110, 10))
+
+    def _build_speed_menu(self, kind: str) -> pystray.Menu:
+        """Build a submenu of percentage options for "fan" or "pump".
+
+        Each option applies both parameters at once via ``_on_fixed(x, y)``: the
+        selected value is paired with the current value of the *other* parameter
+        (read from the last known state), so only one thing changes.
+        """
+        if kind not in ("fan", "pump"):
+            raise ValueError(f"unknown speed kind: {kind!r}")
+
+        current = self._last_state
+        other_value = current.fan_percent if current else 0
+        pump_value = current.pump_percent if current else 0
+
+        def make_handler(value: int):
+            def handler(icon) -> None:
+                fan = value if kind == "fan" else other_value
+                pump = value if kind == "pump" else pump_value
+                self._schedule(self._do_fixed(fan, pump))
+            return handler
+
+        # Show a checkmark (✓) next to the option matching the current value.
+        def is_current(value: int) -> bool:
+            return current is not None and getattr(current, f"{kind}_percent") == value
+
+        items: list[pystray.MenuItem] = []
+        for value in self._speed_choices():
+            label = f"{value}%" if not is_current(value) else f"{value}% ✓"
+            items.append(pystray.MenuItem(label, make_handler(value)))
+        return pystray.Menu(*items)
 
     def _on_exit(self, icon) -> None:
         async def _stop() -> None:
