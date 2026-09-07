@@ -1,6 +1,6 @@
 """Frostbay BLE tray application package."""
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from .protocol import (
     FrostbayState,

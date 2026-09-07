@@ -43,8 +43,14 @@ Tested targets: **Windows 10/11**, **macOS**, **Fedora Linux**.
 - Sends control commands using the verified 3-chunk `1C/2C/3C` transport:
   - **Turn OFF**
   - **Smart Fan**: `silent`, `soft`, `strong` presets
-  - **Fixed Fan** with custom fan % and pump %
-  - **Pump speed** control (clamped to the supported `50..100` range)
+  - **Manual settings**: a preset list of fixed fan/pump pairs, e.g.
+    `Fan/Pump:20-60 … Fan/Pump:40-90` (each applies both values at once; the
+    current one is checked in the menu)
+- **Auto-restart on stop** (menu checkbox): when the pump reports it has
+  stopped while the device is in any active mode (Smart or Fixed), the app
+  re-applies that mode's settings to wake it back up. A deliberate OFF is never
+  restarted. While **Auto temp** is enabled it takes over restarts itself, so
+  auto-restart stays idle and no duplicate commands are sent.
 - **Auto temp mode** (menu checkbox): watches host **CPU/GPU temperature every
   3 s**. When it goes **above 50 °C** and the device reports `stopped`, the app
   sends a start command in **Smart Silent** mode; when it drops **below 45 °C**
@@ -115,7 +121,11 @@ python -m frostbay --no-auto
 
 # Verbose logging
 python -m frostbay --debug
+
+# Print the application version
+python -m frostbay --version
 ```
+
 ## Console mode (no system tray)
 
 On systems without a system-tray host (e.g. **WSL**, headless servers), the app
@@ -133,15 +143,20 @@ presets, fixed fan, and pump control.
 
 - **Status**: current connection state
 - **State block**: mode, running, fan %, flow, pump %, temperatures
+- **CPU / GPU lines**: host temperature (or CPU load where sensors are
+  unavailable, e.g. stock macOS)
 - **Scan for devices...** — perform a BLE scan
 - **Connect** — connect to the first found device or the given address
 - **Disconnect**
 - **Refresh state** — re-read the `FFE1` state blob
+- **Live dashboard…** — real-time graphs (when connected)
 - **Turn OFF**
 - **Smart: Silent / Soft / Strong**
-- **Fixed Fan 50% / Pump 80%**
-- **Fixed Fan 100% / Pump 100%**
-- **Pump → 80% / 100%**
+- **Auto-restart on stop** — checkbox, see [Features](#features)
+- **Auto temp >50°C / <45°C** — checkbox, see [Features](#features)
+- **Manual settings** — preset list:
+  `Fan/Pump:20-60`, `20-70`, `20-80`, `30-60`, `30-70`, `30-80`,
+  `40-70`, `40-80`, `40-90` (✓ marks the currently active pair)
 - **Exit**
 
 ## Project layout
@@ -149,8 +164,11 @@ presets, fixed fan, and pump control.
 ```
 onexFrostBay/
 ├── specification.md          # Frostbay BLE protocol reference
+├── CHANGELOG.md              # release history (Keep a Changelog)
 ├── requirements.txt
 ├── README.md
+├── run.sh                    # one-command launcher (venv + deps + run)
+├── install.sh                # Fedora installer (packages, menu entry, autostart)
 ├── .gitignore
 └── frostbay/
     ├── __init__.py
@@ -158,10 +176,11 @@ onexFrostBay/
     ├── protocol.py           # FFE1 state blob parser + command builders
     ├── ble.py                # bleak-based cross-platform BLE client + auto-polling
     ├── history.py            # ring-buffer telemetry history for graphs
+    ├── host.py               # host CPU/GPU temperature & load telemetry
     ├── dashboard.py          # live curses/text dashboard with sparkline graphs
     ├── console.py            # interactive console controller (WSL / no-tray)
     ├── icons.py              # PIL tray-icon rendering (per-state color)
-    └── app.py                # pystray tray menu + asyncio bridge
+    └── app.py                # pystray tray menu + asyncio bridge + auto-control
 ```
 
 ## Implementation notes
@@ -173,6 +192,8 @@ onexFrostBay/
   sent with ~20 ms gaps, using *Write Without Response*.
 - Pump speed is clamped to the supported `50..100` range; the recommended
   practical range is `80..100`.
+- The **Manual settings** presets and both automation checkboxes (auto-restart,
+  auto temp) all go through the same patched-state writes as the other commands.
 - The tray icon runs on the main thread (required by `pystray`), while BLE I/O
   runs on a background asyncio loop. Actions are dispatched to that loop via
   `asyncio.run_coroutine_threadsafe`.

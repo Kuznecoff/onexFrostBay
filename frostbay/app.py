@@ -45,14 +45,19 @@ except ImportError:  # pragma: no cover - optional for console-only mode
 
 logger = logging.getLogger("frostbay.app")
 
-# When the pump is in FIXED (manual) mode and reports it has stopped, auto-restart
-# re-applies the fixed settings to wake it back up. This works regardless of the
-# set pump value -- any stop at any setting triggers a restart attempt.
+# When the pump reports it has stopped while the device is in an active mode
+# (Smart or Fixed), auto-restart re-applies the current mode's settings to wake
+# it back up. This works regardless of the mode and of the set fan/pump values --
+# any stop at any setting triggers a restart attempt. The OFF mode is respected:
+# if the device was turned off on purpose, nothing is restarted. When the
+# thermal auto-control ("Auto temp") is enabled it takes over this job entirely
+# (its own start-on-stop logic runs temperature-gated), so auto-restart stays
+# out of the way to avoid double commands.
 
 # Minimum seconds between auto-restart attempts. The polling callback fires every
 # ~2s, so this cooldown stops us from hammering the device on every tick while a
 # stopped pump is reported repeatedly.
-AUTO_RESTART_COOLDOWN_SEC = 10.0
+AUTO_RESTART_COOLDOWN_SEC = 1.0
 
 # Thermal auto-control ("Auto temp" checkbox): the app watches host CPU/GPU
 # temperature and drives the pump automatically:
@@ -63,7 +68,7 @@ AUTO_RESTART_COOLDOWN_SEC = 10.0
 # Between the two thresholds nothing is sent (hysteresis band prevents flapping).
 THERMAL_ON_C = 50.0
 THERMAL_OFF_C = 45.0
-THERMAL_POLL_SEC = 3.0
+THERMAL_POLL_SEC = 1.0
 
 
 # --- helpers ----------------------------------------------------------------
@@ -159,6 +164,11 @@ class FrostbayTrayApp:
         # Monotonic timestamp of the last auto-restart attempt (see _maybe_auto_restart).
         # Start at 0 so the first detected stop always triggers an immediate restart.
         self._last_auto_restart_ts = 0.0
+        # In-flight auto-restart command, if any. While it runs (it queues on the
+        # BLE GATT lock behind polls/notifications), no new restart is created --
+        # otherwise every poll tick that still reports "stopped" would pile more
+        # commands onto the lock and they would be delivered in delayed bursts.
+        self._auto_restart_task: Optional["asyncio.Task"] = None
         # Auto-restart is opt-in via a menu checkbox (see _on_toggle_auto_restart).
         self._auto_restart_enabled = True
         # Thermal auto-control ("Auto temp" checkbox, see _on_toggle_thermal):
@@ -208,43 +218,87 @@ class FrostbayTrayApp:
         self._history.push(state)
         self._update_icon(IconState.CONNECTED)
         self._refresh_menu()
-        # Auto-restart: only when the user has enabled it via the menu checkbox, we
-        # are in FIXED (manual) mode and the device reports it has stopped. Re-apply
-        # the fixed settings to wake the pump back up. Runs inside the event loop
-        # (polling callback), so schedule directly; cooldown prevents spamming every
-        # poll tick. Works regardless of the chosen fan/pump values.
+        # Auto-restart: when the user has enabled it via the menu checkbox and the
+        # device reports it has stopped while in an active mode (Smart/Fixed),
+        # re-apply that mode's settings to wake the pump back up. Runs inside the
+        # event loop (polling callback), so schedule directly; cooldown prevents
+        # spamming every poll tick. Skipped while thermal auto-control is on --
+        # it does its own temperature-gated start-on-stop handling.
         if self._auto_restart_enabled and self._should_auto_restart(state):
             self._maybe_auto_restart()
 
-    @staticmethod
-    def _should_auto_restart(state: FrostbayState) -> bool:
-        """True when the pump is in FIXED (manual) mode and currently stopped.
+    def _should_auto_restart(self, state: FrostbayState) -> bool:
+        """True when the device is in an active mode (Smart/Fixed) and stopped.
 
-        Works regardless of the set fan/pump values -- any stop at any setting
-        triggers a restart attempt (when enabled via the menu checkbox).
+        Works regardless of the mode or the set fan/pump values -- any stop at
+        any setting triggers a restart attempt (when enabled via the menu
+        checkbox). OFF is never restarted, and thermal auto-control handles the
+        pump itself while enabled.
         """
-        return state.mode == Mode.FIXED and not state.is_running()
+        if self._thermal_enabled:
+            return False
+        return state.mode != Mode.OFF and not state.is_running()
 
     def _on_toggle_auto_restart(self, icon) -> None:
         """Toggle the auto-restart checkbox in the tray menu."""
         self._auto_restart_enabled = not self._auto_restart_enabled
         logger.info("Auto-restart %s", "enabled" if self._auto_restart_enabled else "disabled")
+        if not self._auto_restart_enabled and self._auto_restart_task is not None:
+            # Drop a queued restart so it does not fire after the user turned
+            # the feature off.
+            self._auto_restart_task.cancel()
+            self._auto_restart_task = None
         self._refresh_menu()
 
     def _maybe_auto_restart(self) -> None:
-        """Re-apply fixed settings if the cooldown has elapsed since last attempt."""
+        """Re-apply the current mode's settings if the cooldown has elapsed.
+
+        At most one restart command is in flight: while the previous attempt is
+        still running (it queues on the BLE GATT lock behind polling reads and
+        notification refreshes), new detections are ignored. The cooldown is
+        re-armed when the attempt *finishes*, so a slow device response cannot
+        stack up a burst of delayed commands.
+        """
+        if self._auto_restart_task is not None and not self._auto_restart_task.done():
+            return  # Previous restart command still in flight; do not queue another.
         now = time.monotonic()
         if now - self._last_auto_restart_ts < AUTO_RESTART_COOLDOWN_SEC:
             return
-        self._last_auto_restart_ts = now
         state = self._last_state
         if state is None:
             return
         logger.info(
-            "Pump stopped in manual mode; re-applying fixed settings to wake it.",
+            "Pump stopped in %s mode; re-applying its settings to wake it.",
+            state.mode.label,
         )
-        # Schedule inside the loop; _do_fixed sends set_fixed(fan, pump).
-        asyncio.create_task(self._do_fixed(state.fan_percent, state.pump_percent))
+        # Restart with the mode the device was left in: fixed settings for FIXED,
+        # the matching smart preset curve for SMART (silent when unknown).
+        if state.mode == Mode.SMART:
+            coro = self._do_smart(self._smart_preset_for(state))
+        else:
+            coro = self._do_fixed(state.fan_percent, state.pump_percent)
+        self._auto_restart_task = asyncio.create_task(self._run_auto_restart(coro))
+
+    async def _run_auto_restart(self, coro) -> None:
+        """Run one auto-restart command and re-arm the cooldown on completion."""
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        finally:
+            # Cooldown counts from completion: the next attempt can only start
+            # AUTO_RESTART_COOLDOWN_SEC after this command actually reached the
+            # device (or failed), not from when it was queued.
+            self._last_auto_restart_ts = time.monotonic()
+            self._auto_restart_task = None
+
+    @staticmethod
+    def _smart_preset_for(state: FrostbayState) -> str:
+        """Return the smart preset whose curve matches the device's current one."""
+        for preset, curve in SMART_CURVES.items():
+            if state.smart_curve == curve:
+                return preset
+        return "silent"
 
     # ---- thermal auto-control (Auto temp checkbox) ----
     def _on_toggle_thermal(self, icon) -> None:
@@ -396,12 +450,11 @@ class FrostbayTrayApp:
             items.append(pystray.MenuItem("Smart: Soft", self._on_smart("soft")))
             items.append(pystray.MenuItem("Smart: Strong", self._on_smart("strong")))
 
-            # Manual fixed settings via a nested dropdown menu. Selecting a fan or
-            # pump value applies both parameters at once through _on_fixed(x, y):
-            # the chosen value is paired with the current value of the other param.
             items.append(pystray.Menu.SEPARATOR)
-            # Auto-restart checkbox: when checked, the app re-applies fixed settings
-            # whenever a stopped pump is detected in manual mode. Toggled via handler.
+            # Auto-restart checkbox: when checked, the app re-applies the current
+            # mode's settings whenever a stopped pump is detected (any active mode).
+            # While "Auto temp" is enabled it handles restarts itself, so this one
+            # stays idle to avoid duplicate commands. Toggled via handler.
             items.append(pystray.MenuItem(
                 "Auto-restart on stop",
                 self._on_toggle_auto_restart,
@@ -417,12 +470,10 @@ class FrostbayTrayApp:
             ))
 
             items.append(pystray.Menu.SEPARATOR)
+            # Manual presets: each item applies a fixed fan/pump pair at once.
             items.append(pystray.MenuItem(
                 "Manual settings",
-                pystray.Menu(
-                    pystray.MenuItem("Fan speed", self._build_speed_menu("fan")),
-                    pystray.MenuItem("Pump speed", self._build_speed_menu("pump")),
-                ),
+                self._build_preset_menu(),
             ))
 
         items.append(pystray.Menu.SEPARATOR)
@@ -568,40 +619,32 @@ class FrostbayTrayApp:
         return handler
 
     # ---- manual fixed settings (nested dropdown menu) ----
-    @staticmethod
-    def _speed_choices() -> list[int]:
-        """Percentage steps offered in the fan/pump speed submenus."""
-        return list(range(0, 110, 10))
+    # Fixed fan/pump percentage pairs offered in the "Manual settings" submenu.
+    MANUAL_PRESETS: tuple[tuple[int, int], ...] = (
+        (20, 60), (20, 70), (20, 80),
+        (30, 60), (30, 70), (30, 80),
+        (40, 70), (40, 80), (40, 90),
+    )
 
-    def _build_speed_menu(self, kind: str) -> pystray.Menu:
-        """Build a submenu of percentage options for "fan" or "pump".
+    def _build_preset_menu(self) -> pystray.Menu:
+        """Build the "Manual settings" submenu of fan/pump presets.
 
-        Each option applies both parameters at once via ``_on_fixed(x, y)``: the
-        selected value is paired with the current value of the *other* parameter
-        (read from the last known state), so only one thing changes.
+        Each preset applies both parameters at once via ``set_fixed(fan, pump)``.
+        The option matching the current device values gets a checkmark (✓).
         """
-        if kind not in ("fan", "pump"):
-            raise ValueError(f"unknown speed kind: {kind!r}")
-
         current = self._last_state
-        other_value = current.fan_percent if current else 0
-        pump_value = current.pump_percent if current else 0
 
-        def make_handler(value: int):
+        def make_handler(fan: int, pump: int):
             def handler(icon) -> None:
-                fan = value if kind == "fan" else other_value
-                pump = value if kind == "pump" else pump_value
                 self._schedule(self._do_fixed(fan, pump))
             return handler
 
-        # Show a checkmark (✓) next to the option matching the current value.
-        def is_current(value: int) -> bool:
-            return current is not None and getattr(current, f"{kind}_percent") == value
-
         items: list[pystray.MenuItem] = []
-        for value in self._speed_choices():
-            label = f"{value}%" if not is_current(value) else f"{value}% ✓"
-            items.append(pystray.MenuItem(label, make_handler(value)))
+        for fan, pump in self.MANUAL_PRESETS:
+            label = f"Fan/Pump:{fan}-{pump}"
+            if current is not None and current.fan_percent == fan and current.pump_percent == pump:
+                label += " ✓"
+            items.append(pystray.MenuItem(label, make_handler(fan, pump)))
         return pystray.Menu(*items)
 
     def _on_exit(self, icon) -> None:
