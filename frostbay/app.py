@@ -54,6 +54,17 @@ logger = logging.getLogger("frostbay.app")
 # stopped pump is reported repeatedly.
 AUTO_RESTART_COOLDOWN_SEC = 10.0
 
+# Thermal auto-control ("Auto temp" checkbox): the app watches host CPU/GPU
+# temperature and drives the pump automatically:
+#   * max(cpu, gpu) > THERMAL_ON_C  -> the pump must run; every THERMAL_POLL_SEC
+#     the device state is checked and, when it reports stopped, a start command
+#     is sent (Smart Silent mode). Same idea as auto-restart, temperature-driven.
+#   * max(cpu, gpu) < THERMAL_OFF_C -> the pump is turned OFF.
+# Between the two thresholds nothing is sent (hysteresis band prevents flapping).
+THERMAL_ON_C = 50.0
+THERMAL_OFF_C = 45.0
+THERMAL_POLL_SEC = 3.0
+
 
 # --- helpers ----------------------------------------------------------------
 
@@ -150,6 +161,12 @@ class FrostbayTrayApp:
         self._last_auto_restart_ts = 0.0
         # Auto-restart is opt-in via a menu checkbox (see _on_toggle_auto_restart).
         self._auto_restart_enabled = True
+        # Thermal auto-control ("Auto temp" checkbox, see _on_toggle_thermal):
+        # starts the pump in Smart Silent when host CPU/GPU goes above THERMAL_ON_C
+        # and turns it OFF below THERMAL_OFF_C. The watcher task runs in the loop.
+        self._thermal_enabled = False
+        self._thermal_task: Optional["asyncio.Task"] = None
+        self._thermal_stop: Optional[asyncio.Event] = None
 
     # ---- asyncio loop runner ----
     def _run_loop(self) -> None:
@@ -229,6 +246,94 @@ class FrostbayTrayApp:
         # Schedule inside the loop; _do_fixed sends set_fixed(fan, pump).
         asyncio.create_task(self._do_fixed(state.fan_percent, state.pump_percent))
 
+    # ---- thermal auto-control (Auto temp checkbox) ----
+    def _on_toggle_thermal(self, icon) -> None:
+        """Toggle the thermal auto-control checkbox in the tray menu."""
+        self._thermal_enabled = not self._thermal_enabled
+        logger.info("Thermal auto-control %s", "enabled" if self._thermal_enabled else "disabled")
+        if self._thermal_enabled:
+            self._schedule(self._start_thermal_watcher())
+        else:
+            self._schedule(self._stop_thermal_watcher())
+        self._refresh_menu()
+
+    async def _start_thermal_watcher(self) -> None:
+        """Start the 3 s temperature watcher loop (idempotent)."""
+        if self._thermal_task is not None and not self._thermal_task.done():
+            return
+        self._thermal_stop = asyncio.Event()
+        self._thermal_task = asyncio.create_task(self._thermal_loop())
+        logger.info(
+            "Thermal watcher started (start >%.0f°C, stop <%.0f°C, every %.0fs).",
+            THERMAL_ON_C, THERMAL_OFF_C, THERMAL_POLL_SEC,
+        )
+
+    async def _stop_thermal_watcher(self) -> None:
+        if self._thermal_stop is not None:
+            self._thermal_stop.set()
+        task, self._thermal_task = self._thermal_task, None
+        self._thermal_stop = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _thermal_loop(self) -> None:
+        assert self._thermal_stop is not None
+        while not self._thermal_stop.is_set():
+            try:
+                await self._thermal_tick()
+            except Exception as exc:
+                logger.debug("Thermal tick error: %s", exc)
+            try:
+                await asyncio.wait_for(self._thermal_stop.wait(), timeout=THERMAL_POLL_SEC)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
+    @staticmethod
+    def _host_max_temp() -> Optional[float]:
+        """Max of host CPU/GPU temperature in °C, or None when no sensor."""
+        host = get_host_stats()
+        temps = [t for t in (host.cpu_temp_c, host.gpu_temp_c) if t is not None]
+        return max(temps) if temps else None
+
+    async def _thermal_tick(self) -> None:
+        """One 3-second thermal check.
+
+        Above THERMAL_ON_C the device state is polled; when it reports stopped,
+        a start command (Smart Silent) is sent -- same idea as auto-restart, but
+        temperature-driven. Below THERMAL_OFF_C a running pump is turned OFF.
+        Between the thresholds nothing happens (hysteresis prevents flapping).
+        """
+        if self._ble is None or not self._ble.is_connected:
+            return
+        temp = self._host_max_temp()
+        if temp is None:
+            return  # No temperature sensor on this platform; stay hands-off.
+        if temp > THERMAL_ON_C:
+            state = await self._ble.read_state()
+            self._last_state = state
+            if not state.is_running():
+                logger.info(
+                    "Thermal: %.1f°C > %.0f°C and pump stopped -> starting Smart Silent.",
+                    temp, THERMAL_ON_C,
+                )
+                await self._do_smart("silent")
+        elif temp < THERMAL_OFF_C:
+            state = self._last_state
+            if state is None or state.is_running():
+                state = await self._ble.read_state()
+                self._last_state = state
+            if state.is_running():
+                logger.info(
+                    "Thermal: %.1f°C < %.0f°C -> turning pump OFF.", temp, THERMAL_OFF_C,
+                )
+                await self._do_off()
+
     # ---- icon / menu ----
     def _update_icon(self, state: IconState) -> None:
         if self._icon is None:
@@ -301,6 +406,14 @@ class FrostbayTrayApp:
                 "Auto-restart on stop",
                 self._on_toggle_auto_restart,
                 checked=lambda _: self._auto_restart_enabled,
+            ))
+            # Thermal auto-control checkbox: when checked, the app watches host
+            # CPU/GPU temperature every 3 s and starts the pump (Smart Silent)
+            # above 50°C / turns it OFF below 45°C.
+            items.append(pystray.MenuItem(
+                "Auto temp >50°C / <45°C",
+                self._on_toggle_thermal,
+                checked=lambda _: self._thermal_enabled,
             ))
 
             items.append(pystray.Menu.SEPARATOR)
@@ -493,6 +606,7 @@ class FrostbayTrayApp:
 
     def _on_exit(self, icon) -> None:
         async def _stop() -> None:
+            await self._stop_thermal_watcher()
             if self._ble is not None:
                 await self._ble.disconnect()
             self._stop_event.set()

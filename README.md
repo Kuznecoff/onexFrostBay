@@ -45,6 +45,11 @@ Tested targets: **Windows 10/11**, **macOS**, **Fedora Linux**.
   - **Smart Fan**: `silent`, `soft`, `strong` presets
   - **Fixed Fan** with custom fan % and pump %
   - **Pump speed** control (clamped to the supported `50..100` range)
+- **Auto temp mode** (menu checkbox): watches host **CPU/GPU temperature every
+  3 s**. When it goes **above 50 °C** and the device reports `stopped`, the app
+  sends a start command in **Smart Silent** mode; when it drops **below 45 °C**
+  the pump is turned **OFF**. The 45–50 °C band is a hysteresis zone (no
+  commands), so the pump never flaps.
 
 ## Quick start (one command)
 
