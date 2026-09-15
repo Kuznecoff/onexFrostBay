@@ -46,10 +46,63 @@ class HostStats:
 
 
 # Labels / chip names that reliably indicate the main CPU thermal sensor.
-_CPU_HINTS = ("cpu", "coretemp", "k10temp", "zenpower", "acpitz", "cpu_thermal")
+# On AMD (incl. Strix Halo / Zen 5) the chip is ``k10temp`` and its entries are
+# labelled ``Tctl`` / ``Tcase`` / ``Tsi`` -- the *chip* name, not the entry
+# label, is what identifies it, so both are matched below.
+_CPU_HINTS = (
+    "cpu", "coretemp", "k10temp", "k10", "zenpower", "zen", "acpitz",
+    "cpu_thermal", "cpu-thermal", "x86_pkg_temp", "soc_thermal", "strix",
+)
 
 # Labels / chip names that reliably indicate a GPU thermal sensor.
-_GPU_HINTS = ("nvidia", "amdgpu", "dgpu", "i915", "intel_gpu", "gpu")
+_GPU_HINTS = ("nvidia", "amdgpu", "dgpu", "i915", "intel_gpu", "gpu", "radeon", "nouveau")
+
+
+def _classify(chip: str) -> str:
+    """Classify an hwmon chip name as 'cpu', 'gpu' or '' (unknown)."""
+    chip_l = (chip or "").lower()
+    if any(h in chip_l for h in _GPU_HINTS):
+        return "gpu"
+    if any(h in chip_l for h in _CPU_HINTS) or chip_l.startswith(("cpu", "core", "k10", "zen")):
+        return "cpu"
+    return ""
+
+
+def _read_sysfs_temps() -> tuple[Optional[float], Optional[float]]:
+    """Fallback CPU/GPU temperature read straight from /sys hwmon nodes.
+
+    psutil can return an empty sensor map on some distros/kernels even when
+    ``/sys/class/hwmon`` exposes the sensors, which would otherwise hide the
+    temperature behind a CPU-load percentage. Returns ``(cpu_c, gpu_c)``.
+    """
+    import glob
+    import os
+
+    cpu: Optional[float] = None
+    gpu: Optional[float] = None
+    for hwmon in glob.glob("/sys/class/hwmon/hwmon*"):
+        try:
+            with open(os.path.join(hwmon, "name")) as fh:
+                kind = _classify(fh.read().strip())
+        except OSError:
+            continue
+        if not kind:
+            continue
+        for tin in glob.glob(os.path.join(hwmon, "temp*_input")):
+            try:
+                with open(tin) as fh:
+                    val = float(fh.read().strip()) / 1000.0
+            except (OSError, ValueError):
+                continue
+            if val <= 0:
+                continue
+            if kind == "gpu":
+                if gpu is None or val > gpu:
+                    gpu = val
+            else:
+                if cpu is None or val > cpu:
+                    cpu = val
+    return cpu, gpu
 
 
 def _read_once() -> HostStats:
@@ -58,7 +111,8 @@ def _read_once() -> HostStats:
     load: Optional[float] = None
 
     if psutil is None:
-        return HostStats(timestamp=time.time())
+        c, g = _read_sysfs_temps()
+        return HostStats(cpu_temp_c=c, gpu_temp_c=g, timestamp=time.time())
 
     # Read temperature sensors. Tolerate platforms (e.g. stock macOS) that expose
     # no such API or sensor by falling through to CPU utilisation below, rather
@@ -66,21 +120,32 @@ def _read_once() -> HostStats:
     try:
         temps = psutil.sensors_temperatures() or {}
         for chip, entries in temps.items():
+            kind = _classify(chip)
             for entry in entries:
                 current = getattr(entry, "current", None)
                 if not current:
                     continue
-                label = (getattr(entry, "label", None) or chip or "").lower()
+                label = (getattr(entry, "label", None) or "").lower()
+                entry_gpu = kind == "gpu" or any(h in label for h in _GPU_HINTS)
+                entry_cpu = kind == "cpu" or any(h in label for h in _CPU_HINTS)
                 # GPU sensor takes precedence so we don't mistake it for the CPU.
-                if any(hint in label for hint in _GPU_HINTS):
-                    if gpu_temp is None:
+                if entry_gpu:
+                    if gpu_temp is None or float(current) > gpu_temp:
                         gpu_temp = float(current)
                     continue
-                if any(hint in label for hint in _CPU_HINTS) or chip.lower().startswith(("cpu", "core")):
-                    temp = float(current)
-                    break
+                if entry_cpu:
+                    if temp is None or float(current) > temp:
+                        temp = float(current)
     except Exception:
         pass
+
+    # Fallback: read hwmon directly from sysfs when psutil exposed nothing usable.
+    if temp is None or gpu_temp is None:
+        s_cpu, s_gpu = _read_sysfs_temps()
+        if temp is None:
+            temp = s_cpu
+        if gpu_temp is None:
+            gpu_temp = s_gpu
 
     # Fallback on platforms without a readable sensor (e.g. stock macOS):
     # surface CPU utilisation instead of nothing, clearly labelled as %.
