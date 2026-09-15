@@ -19,7 +19,8 @@ Tested targets: **Windows 10/11**, **macOS**, **Fedora Linux**.
   - 🔴 red    — disconnected / connection error
   - ⚪ grey   — idle / scanning
   - 🟠 orange — error
-- BLE scan and connect (via `bleak`, works on Windows/macOS/Fedora)
+- BLE scan and connect (via `bleak`, works on Windows/macOS/Fedora), with
+  automatic connect retries that ride out transient BlueZ service-discovery errors
 - **Automatic device discovery** by advertised name substring `ONEC1`
   (e.g. `CoolingSystem_ONEC1`). On startup the app scans for a device whose
   name contains `ONEC1` (case-insensitive) and connects to the first match.
@@ -46,11 +47,14 @@ Tested targets: **Windows 10/11**, **macOS**, **Fedora Linux**.
   - **Manual settings**: a preset list of fixed fan/pump pairs, e.g.
     `Fan/Pump:20-60 … Fan/Pump:40-90` (each applies both values at once; the
     current one is checked in the menu)
-- **Auto-restart on stop** (menu checkbox): when the pump reports it has
-  stopped while the device is in any active mode (Smart or Fixed), the app
-  re-applies that mode's settings to wake it back up. A deliberate OFF is never
-  restarted. While **Auto temp** is enabled it takes over restarts itself, so
-  auto-restart stays idle and no duplicate commands are sent.
+- **Auto-restart on stop** (menu checkbox): when the pump stops on its own while
+  the device is in an active mode (Smart or Fixed), the app re-applies that
+  mode's settings to wake it back up. To avoid disrupting a fresh start it only
+  reacts to a real running→stopped transition and stays silent for a short
+  startup grace window (~10 s) after any command, so the pump can spin up
+  undisturbed. A deliberate OFF is never restarted. While **Auto temp** is
+  enabled it takes over restarts itself, so auto-restart stays idle and no
+  duplicate commands are sent.
 - **Auto temp mode** (menu checkbox): watches host **CPU/GPU temperature every
   3 s**. When it goes **above 50 °C** and the device reports `stopped`, the app
   sends a start command in **Smart Silent** mode; when it drops **below 45 °C**
@@ -192,7 +196,9 @@ presets, fixed fan, and pump control.
 - **Status**: current connection state
 - **State block**: mode, running, fan %, flow, pump %, temperatures
 - **CPU / GPU lines**: host temperature (or CPU load where sensors are
-  unavailable, e.g. stock macOS)
+  unavailable, e.g. stock macOS). hwmon sensors are classified by chip name and
+  read directly from `/sys/class/hwmon` as a fallback when `psutil` exposes
+  nothing usable (e.g. AMD `k10temp` on Strix Halo / Zen 5)
 - **Scan for devices...** — perform a BLE scan
 - **Connect** — connect to the first found device or the given address
 - **Disconnect**

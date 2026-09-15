@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-15
+
+### Fixed
+
+- **Auto-restart no longer disrupts a fresh pump start.** The read-back inside a
+  just-sent Smart/Fixed command reported the pump as still stopped (it had not
+  spun up yet), which immediately triggered a re-apply that landed mid-startup
+  and kept the device from ever reaching a running state. Auto-restart now uses
+  two guards: a **startup grace window** (~10 s after any active-mode command,
+  during which it stays silent so the pump can spin up) and a
+  **running→stopped edge trigger** (it only restarts a pump that was actually
+  observed running, leaving a freshly written mode alone until it comes up).
+  Applied consistently to the tray, curses and Textual interfaces.
+- **BLE connect now retries transient failures.** `connect()` attempts up to 3
+  times and scopes service discovery to the Frostbay `FFE0` primary service, so
+  a momentary BlueZ ATT "Unlikely Error" (0x0E) during enumeration no longer
+  drops the link as a hard "failed to discover services".
+- **Host CPU/GPU temperature is read reliably on more platforms.** hwmon sensors
+  are classified by chip name (not just the entry label), covering AMD `k10temp`
+  (`Tctl`/`Tcase`/`Tsi`) on Strix Halo / Zen 5, and a direct `/sys/class/hwmon`
+  fallback surfaces temperatures when `psutil` returns an empty sensor map.
+
 ## [0.4.0] - 2026-09-15
 
 ### Added
@@ -101,7 +123,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live auto-refresh polling and a live dashboard with unicode sparkline graphs.
 - Console controller (`--no-tray`) for headless environments.
 
-[Unreleased]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.2.0...v0.3.0
