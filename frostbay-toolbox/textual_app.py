@@ -9,6 +9,7 @@ set pump, plus a live dashboard (sparklines + gauges) and host CPU/GPU.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import threading
 import time
@@ -34,12 +35,17 @@ from textual.widgets import (
     Switch,
 )
 
+from frostbay import __version__
 from frostbay.ble import FrostbayBLE, FROSTBAY_NAME_PART
 from frostbay.history import History
 from frostbay.host import get_host_stats, format_cpu, format_gpu
 from frostbay.protocol import FrostbayState, Mode, SMART_CURVES
 
 AUTO_RESTART_COOLDOWN_SEC = 1.0
+
+# Grace window after any active-mode command (user click or auto-restart) during
+# which auto-restart stays silent, so the pump can spin up undisturbed.
+STARTUP_GRACE_SEC = 10.0
 THERMAL_ON_C = 50.0
 THERMAL_OFF_C = 45.0
 
@@ -55,6 +61,32 @@ ORANGE_BRIGHT = "#ffb347"
 ORANGE_DIM = "#8a4a08"
 BG = "#140f0a"
 PANEL = "#1d150d"
+
+
+class _LogToBuffer(logging.Handler):
+    """Route library log records (frostbay/bleak) into the app's log buffer.
+
+    ``emit`` only appends to a thread-safe deque; the periodic UI tick renders
+    it, so this is safe to call from the BLE asyncio loop thread.
+    """
+
+    def __init__(self, app: "FrostbayTextualApp") -> None:
+        super().__init__()
+        self._app = app
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._app.logbuf.append(f"{record.name}: {record.getMessage()}")
+        except Exception:
+            pass
+
+
+class VersionFooter(Footer):
+    """Footer that appends the application version after the key bindings."""
+
+    def compose(self):
+        yield from super().compose()
+        yield Static(f"v{__version__}", id="app-version")
 
 
 class FrostbayTextualApp(App):
@@ -159,6 +191,11 @@ class FrostbayTextualApp(App):
         border: round {ORANGE_DIM};
         background: #1a120a;
     }}
+    #app-version {{
+        color: {ORANGE_BRIGHT};
+        text-style: bold;
+        padding: 0 2;
+    }}
     """
 
     BINDINGS = [
@@ -177,10 +214,17 @@ class FrostbayTextualApp(App):
         self.state: Optional[FrostbayState] = None
         self.devices: list[str] = []
         self.status = "Ready"
-        self.logbuf: deque[str] = deque(maxlen=8)
+        self.logbuf: deque[str] = deque(maxlen=50)
+        self._ble_log_handler: Optional[logging.Handler] = None
         self.auto_restart_enabled = True
         self.thermal_enabled = False
         self._last_auto_restart_ts = 0.0
+        # Monotonic timestamp of the last active-mode command (user or auto).
+        # Drives the startup grace window in _maybe_auto_restart.
+        self._last_user_cmd_ts = 0.0
+        # Latched True once the pump has been observed running since the last
+        # command; auto-restart only fires on a running->stopped transition.
+        self._was_running = False
         self._bg_stop = threading.Event()
         self._bg_thread: Optional[threading.Thread] = None
 
@@ -195,12 +239,42 @@ class FrostbayTextualApp(App):
     def _log(self, message: str) -> None:
         self.logbuf.append(message)
 
+    def _note_command(self) -> None:
+        """Arm the startup grace window and clear the running latch.
+
+        Called on every user-initiated cooling command so auto-restart stays out
+        of the way while the pump spins up, and only restarts on a real
+        running->stopped transition afterwards.
+        """
+        self._last_user_cmd_ts = time.monotonic()
+        self._was_running = False
+
+    def _set_ble_logging(self, enabled: bool) -> None:
+        """Attach/detach a handler that surfaces frostbay/bleak errors in the log."""
+        names = ("frostbay", "bleak", "bleak.backends.bluezdbus.client", "bleak.backends.bluezdbus.manager")
+        if enabled and self._ble_log_handler is None:
+            handler = _LogToBuffer(self)
+            handler.setLevel(logging.WARNING)
+            for name in names:
+                lg = logging.getLogger(name)
+                lg.addHandler(handler)
+                lg.setLevel(logging.WARNING)
+            self._ble_log_handler = handler
+            self._log("BLE error logging enabled")
+        elif not enabled and self._ble_log_handler is not None:
+            for name in names:
+                logging.getLogger(name).removeHandler(self._ble_log_handler)
+            self._ble_log_handler = None
+            self._log("BLE error logging disabled")
+
     # ---- BLE operations (blocking, run in worker/bg threads) ----
     def _refresh_state(self) -> None:
         if not self.ble.is_connected:
             return
         state = self._run_async(self.ble.read_state())
         self.state = state
+        if state.is_running():
+            self._was_running = True
         self.history.push(state)
         self.status = "Connected"
 
@@ -240,24 +314,28 @@ class FrostbayTextualApp(App):
         self._log("Disconnected")
 
     def _do_off(self) -> None:
+        self._note_command()
         self.state = self._run_async(self.ble.set_off())
         self.history.push(self.state)
         self._log("Device OFF")
         self.status = "OFF"
 
     def _do_smart(self, preset: str) -> None:
+        self._note_command()
         self.state = self._run_async(self.ble.set_smart(preset))
         self.history.push(self.state)
         self._log(f"Smart {preset}")
         self.status = f"Smart {preset}"
 
     def _do_fixed(self, fan: int, pump: int) -> None:
+        self._note_command()
         self.state = self._run_async(self.ble.set_fixed(fan, pump))
         self.history.push(self.state)
         self._log(f"Fixed {fan}% / {pump}%")
         self.status = f"Fixed {fan}% / {pump}%"
 
     def _do_set_pump(self, value: int) -> None:
+        self._note_command()
         self.state = self._run_async(self.ble.set_pump(value))
         self.history.push(self.state)
         self._log(f"Pump set to {value}%")
@@ -285,7 +363,11 @@ class FrostbayTextualApp(App):
         state = self.state
         if state is None or state.mode == Mode.OFF or state.is_running():
             return
+        if not self._was_running:
+            return
         now = time.monotonic()
+        if now - self._last_user_cmd_ts < STARTUP_GRACE_SEC:
+            return
         if now - self._last_auto_restart_ts < AUTO_RESTART_COOLDOWN_SEC:
             return
         try:
@@ -300,6 +382,8 @@ class FrostbayTextualApp(App):
             self._log(f"Auto-restart failed: {exc}")
         finally:
             self._last_auto_restart_ts = time.monotonic()
+            self._last_user_cmd_ts = time.monotonic()
+            self._was_running = False
 
     def _thermal_tick(self) -> None:
         if not self.thermal_enabled or not self.ble.is_connected:
@@ -390,6 +474,11 @@ class FrostbayTextualApp(App):
                     yield Input(placeholder="Pump %", id="pump_input")
                     yield Button("Apply", id="apply_pump")
 
+                yield Static("LOGGING", classes="section-title")
+                with Horizontal(classes="switch-row"):
+                    yield Switch(value=True, id="ble_log")
+                    yield Static("Show BLE errors in log")
+
             with VerticalScroll(id="dashboard"):
                 yield Static("", id="status_line", classes="status-line")
                 yield Static("DEVICE STATUS", classes="section-title")
@@ -413,9 +502,10 @@ class FrostbayTextualApp(App):
                                min_color=ORANGE_DIM, max_color=ORANGE_BRIGHT)
                 yield Static("LOG", classes="section-title")
                 yield Static("", id="log_panel")
-        yield Footer()
+        yield VersionFooter()
 
     def on_mount(self) -> None:
+        self._set_ble_logging(True)
         self._bg_thread = threading.Thread(target=self._bg_loop, daemon=True)
         self._bg_thread.start()
         self._update_ui()
@@ -468,7 +558,7 @@ class FrostbayTextualApp(App):
         self._set_spark("spark_fan", self.history.series("fan"))
         self._set_spark("spark_pump", self.history.series("pump"))
 
-        log_text = "\n".join(list(self.logbuf)[-6:]) if self.logbuf else "[dim]—[/dim]"
+        log_text = "\n".join(list(self.logbuf)[-10:]) if self.logbuf else "[dim]—[/dim]"
         self.query_one("#log_panel", Static).update(log_text)
 
         connected = self.ble.is_connected
@@ -523,6 +613,8 @@ class FrostbayTextualApp(App):
         elif event.switch.id == "auto_temp":
             self.thermal_enabled = event.value
             self._log(f"Auto temp {'enabled' if event.value else 'disabled'}")
+        elif event.switch.id == "ble_log":
+            self._set_ble_logging(event.value)
 
     def action_refresh(self) -> None:
         if self.ble.is_connected:

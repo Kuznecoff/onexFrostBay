@@ -59,6 +59,12 @@ logger = logging.getLogger("frostbay.app")
 # stopped pump is reported repeatedly.
 AUTO_RESTART_COOLDOWN_SEC = 1.0
 
+# Grace window after any active-mode command (user click or auto-restart) during
+# which auto-restart stays silent. The pump needs a few seconds to spin up and
+# establish flow; a re-apply landing inside that window resets the startup and
+# keeps the device from ever reaching a running state.
+STARTUP_GRACE_SEC = 10.0
+
 # Thermal auto-control ("Auto temp" checkbox): the app watches host CPU/GPU
 # temperature and drives the pump automatically:
 #   * max(cpu, gpu) > THERMAL_ON_C  -> the pump must run; every THERMAL_POLL_SEC
@@ -171,6 +177,13 @@ class FrostbayTrayApp:
         self._auto_restart_task: Optional["asyncio.Task"] = None
         # Auto-restart is opt-in via a menu checkbox (see _on_toggle_auto_restart).
         self._auto_restart_enabled = True
+        # Monotonic timestamp of the last active-mode command (user or auto).
+        # Drives the startup grace window in _should_auto_restart.
+        self._last_user_cmd_ts = 0.0
+        # Latched True once the pump has been observed running since the last
+        # command. Auto-restart only fires on a running->stopped transition, so
+        # a freshly written mode that has not spun up yet is left alone.
+        self._was_running = False
         # Thermal auto-control ("Auto temp" checkbox, see _on_toggle_thermal):
         # starts the pump in Smart Silent when host CPU/GPU goes above THERMAL_ON_C
         # and turns it OFF below THERMAL_OFF_C. The watcher task runs in the loop.
@@ -215,6 +228,8 @@ class FrostbayTrayApp:
 
     def _on_state_cb(self, state: FrostbayState) -> None:
         self._last_state = state
+        if state.is_running():
+            self._was_running = True
         self._history.push(state)
         self._update_icon(IconState.CONNECTED)
         self._refresh_menu()
@@ -228,16 +243,28 @@ class FrostbayTrayApp:
             self._maybe_auto_restart()
 
     def _should_auto_restart(self, state: FrostbayState) -> bool:
-        """True when the device is in an active mode (Smart/Fixed) and stopped.
+        """True only for a pump that was running and has now stopped.
 
-        Works regardless of the mode or the set fan/pump values -- any stop at
-        any setting triggers a restart attempt (when enabled via the menu
-        checkbox). OFF is never restarted, and thermal auto-control handles the
-        pump itself while enabled.
+        Two guards keep auto-restart from disrupting a fresh start:
+          * grace period -- for STARTUP_GRACE_SEC after any active-mode command
+            we never restart, so the pump can spin up undisturbed;
+          * edge-trigger -- we restart only when the pump was previously seen
+            running (_was_running, latched in _on_state_cb). A mode that was
+            just written and has not reached running yet is left alone.
+        OFF is never restarted, and thermal auto-control handles the pump itself
+        while enabled.
         """
         if self._thermal_enabled:
             return False
-        return state.mode != Mode.OFF and not state.is_running()
+        if state.mode == Mode.OFF:
+            return False
+        if state.is_running():
+            return False
+        if not self._was_running:
+            return False
+        if time.monotonic() - self._last_user_cmd_ts < STARTUP_GRACE_SEC:
+            return False
+        return True
 
     def _on_toggle_auto_restart(self, icon) -> None:
         """Toggle the auto-restart checkbox in the tray menu."""
@@ -571,6 +598,11 @@ class FrostbayTrayApp:
         await self._command(self._ble.set_pump(pump))
 
     async def _command(self, coro) -> None:
+        # Any command (user-initiated or auto-restart) re-arms the startup grace
+        # window and clears the running latch: the device must reach running=1
+        # again before the next auto-restart is allowed.
+        self._last_user_cmd_ts = time.monotonic()
+        self._was_running = False
         if self._ble is None or not self._ble.is_connected:
             logger.warning("Not connected; command ignored.")
             return

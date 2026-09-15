@@ -24,6 +24,10 @@ from frostbay.protocol import FrostbayState, Mode, SMART_CURVES
 # re-applying the current mode's settings when a stopped pump is detected.
 AUTO_RESTART_COOLDOWN_SEC = 1.0
 
+# Grace window after any active-mode command (user click or auto-restart) during
+# which auto-restart stays silent, so the pump can spin up undisturbed.
+STARTUP_GRACE_SEC = 10.0
+
 # Thermal auto-control thresholds (host CPU/GPU temperature in degrees C).
 # Above THERMAL_ON_C the pump is started (Smart Silent) when stopped; below
 # THERMAL_OFF_C a running pump is turned OFF. The band between is a hysteresis
@@ -59,6 +63,12 @@ class TerminalFrostbayApp:
         # settings are re-applied to wake the pump back up.
         self.auto_restart_enabled = True
         self._last_auto_restart_ts = 0.0
+        # Monotonic timestamp of the last active-mode command (user or auto).
+        # Drives the startup grace window in _maybe_auto_restart.
+        self._last_user_cmd_ts = 0.0
+        # Latched True once the pump has been observed running since the last
+        # command; auto-restart only fires on a running->stopped transition.
+        self._was_running = False
         # Thermal auto-control (tray "Auto temp" checkbox). When enabled the app
         # watches host CPU/GPU temperature and starts/stops the pump accordingly.
         self.thermal_enabled = False
@@ -73,12 +83,24 @@ class TerminalFrostbayApp:
     def _log(self, message: str) -> None:
         self.log.append(message)
 
+    def _note_command(self) -> None:
+        """Arm the startup grace window and clear the running latch.
+
+        Called on every user-initiated cooling command so auto-restart stays out
+        of the way while the pump spins up, and only restarts on a real
+        running->stopped transition afterwards.
+        """
+        self._last_user_cmd_ts = time.monotonic()
+        self._was_running = False
+
     def _refresh_state(self) -> None:
         if not self.ble.is_connected:
             return
         try:
             state = self._run_async(self.ble.read_state())
             self.state = state
+            if state.is_running():
+                self._was_running = True
             self.history.push(state)
             self.status = "Connected"
         except Exception as exc:
@@ -147,6 +169,7 @@ class TerminalFrostbayApp:
             self.status = f"Refresh failed: {exc}"
 
     def _action_off(self) -> None:
+        self._note_command()
         if not self.ble.is_connected:
             self._log("Not connected")
             return
@@ -160,6 +183,7 @@ class TerminalFrostbayApp:
             self.status = f"OFF failed: {exc}"
 
     def _action_smart(self, preset: str) -> None:
+        self._note_command()
         if not self.ble.is_connected:
             self._log("Not connected")
             return
@@ -173,6 +197,7 @@ class TerminalFrostbayApp:
             self.status = f"Smart {preset} failed: {exc}"
 
     def _action_fixed(self, fan: int, pump: int) -> None:
+        self._note_command()
         if not self.ble.is_connected:
             self._log("Not connected")
             return
@@ -186,6 +211,7 @@ class TerminalFrostbayApp:
             self.status = f"Fixed mode failed: {exc}"
 
     def _action_set_pump(self, value: int) -> None:
+        self._note_command()
         if not self.ble.is_connected:
             self._log("Not connected")
             return
@@ -238,7 +264,11 @@ class TerminalFrostbayApp:
         state = self.state
         if state is None or state.mode == Mode.OFF or state.is_running():
             return
+        if not self._was_running:
+            return
         now = time.monotonic()
+        if now - self._last_user_cmd_ts < STARTUP_GRACE_SEC:
+            return
         if now - self._last_auto_restart_ts < AUTO_RESTART_COOLDOWN_SEC:
             return
         try:
@@ -253,6 +283,8 @@ class TerminalFrostbayApp:
             self._log(f"Auto-restart failed: {exc}")
         finally:
             self._last_auto_restart_ts = time.monotonic()
+            self._last_user_cmd_ts = time.monotonic()
+            self._was_running = False
 
     def _thermal_tick(self) -> None:
         """One thermal check: start Smart Silent above THERMAL_ON_C, OFF below THERMAL_OFF_C."""
