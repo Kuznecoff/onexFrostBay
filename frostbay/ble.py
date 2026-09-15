@@ -144,17 +144,56 @@ class FrostbayBLE:
         return found
 
     # --- connection -----------------------------------------------------
-    async def connect(self, address: Optional[str] = None, timeout: float = 30.0) -> None:
+    async def connect(
+        self,
+        address: Optional[str] = None,
+        timeout: float = 30.0,
+        attempts: int = 3,
+    ) -> None:
         addr = address or self._address
         if not addr:
             raise ValueError("No device address provided")
         self._address = addr
-        logger.info("Connecting to %s ...", addr)
-        self._client = BleakClient(addr, timeout=timeout)
-        await self._client.connect()
-        await self._resolve_chars()
-        self._connected = True
-        logger.info("Connected to Frostbay at %s", addr)
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                logger.info("Connecting to %s (attempt %d/%d) ...", addr, attempt, attempts)
+                # Restrict discovery to the Frostbay FFE0 primary service. Over
+                # BlueZ the device can answer a service enumeration with an ATT
+                # "Unlikely Error" (0x0E) and drop the link before
+                # ServicesResolved becomes true, which surfaces as
+                # "failed to discover services" / "Service Discovery has not
+                # been performed yet". Asking only for FFE0 (which carries
+                # FFE1/FFE4) narrows what we need, and the retry below rides out
+                # the transient failure.
+                self._client = BleakClient(addr, services=[UUID_FFE0], timeout=timeout)
+                await self._client.connect()
+                await self._resolve_chars()
+                self._connected = True
+                last_exc = None
+                logger.info("Connected to Frostbay at %s", addr)
+                break
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Connect attempt %d/%d failed: %s", attempt, attempts, exc
+                )
+                # Tear down any half-open link so BlueZ does not keep a stale
+                # connection that blocks the next Connect call.
+                try:
+                    if self._client is not None:
+                        await self._client.disconnect()
+                except Exception:
+                    pass
+                self._client = None
+                self._connected = False
+                if attempt < attempts:
+                    await asyncio.sleep(0.6)
+
+        if last_exc is not None:
+            raise last_exc
+
         # Initial state read + notification subscription.
         try:
             await self.refresh_state()
