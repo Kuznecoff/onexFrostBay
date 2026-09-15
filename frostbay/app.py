@@ -714,6 +714,11 @@ def main() -> int:
     if use_console:
         return run_console(address=address)
 
+    # Linux is terminal-only in this project. No tray means no system icon.
+    if sys.platform.startswith("linux"):
+        logger.info("Linux detected: running terminal-only interface (no tray).")
+        return run_console(address=address)
+
     # Try tray; fall back to console if the tray backend is unavailable
     # (e.g. inside WSL without a StatusNotifierItem host).
     app = FrostbayTrayApp(address=address, auto_connect=auto_connect)

@@ -84,6 +84,43 @@ It installs `bluez`/python packages (sudo), creates the venv, adds a
 On GNOME also enable the *AppIndicator and KStatusNotifierItem Support*
 extension if the tray icon does not appear (KDE works out of the box).
 
+## Terminal Toolbox (Textual TUI)
+
+`frostbay-toolbox/` is a **terminal-only** controller built with
+[Textual](https://github.com/Textualize/textual), styled with an orange
+theme (rounded orange borders, orange gauges and sparklines). It exposes the
+full tray control surface in the terminal — scan / find & connect / connect
+by address / disconnect / refresh / OFF / Smart (silent/soft/strong) /
+**Auto-restart on stop** / **Auto temp** toggles / manual fan-pump presets /
+set pump — plus a live dashboard (Fan/Pump progress bars and Temp IN/OUT,
+Flow, Fan, Pump sparklines), host CPU/GPU telemetry and an event log.
+
+Run it directly:
+
+```bash
+cd frostbay-toolbox
+./run.sh
+```
+
+### Toolbox install scripts
+
+The toolbox ships its own lifecycle scripts (Linux; `dnf` or `apt-get`):
+
+```bash
+cd frostbay-toolbox
+
+./install.sh                 # system packages + venv + launcher + apps-menu entry
+./install-autostart.sh       # the above + autostart on login
+./disable-autostart.sh       # disable autostart (keeps the app installed)
+./uninstall.sh               # remove launcher + menu entry + autostart
+./uninstall.sh --purge       # also delete the virtual environment
+```
+
+`install.sh` puts a `frostbay-toolbox` launcher in `~/.local/bin` (make sure
+it is on `PATH`) and adds an applications-menu entry that opens the TUI in
+your default terminal. The virtual environment is shared with the main tray
+app, so `uninstall.sh` keeps it unless you pass `--purge`.
+
 ## Install (manual)
 
 ```bash
@@ -128,9 +165,10 @@ python -m frostbay --version
 
 ## Console mode (no system tray)
 
-On systems without a system-tray host (e.g. **WSL**, headless servers), the app
-falls back automatically to an interactive console controller. You can also
-force it explicitly:
+When the tray backend cannot initialize at all (e.g. `pystray`/`Pillow` are not
+installed, or there is no display backend whatsoever), the app falls back
+automatically to an interactive console controller. You can also force it
+explicitly:
 
 ```bash
 python -m frostbay --no-tray
@@ -139,6 +177,16 @@ python -m frostbay --no-tray
 It exposes the same control surface via a numeric menu: scan, find &
 connect (`*ONEC1*`), connect by address, disconnect, refresh state, OFF, smart
 presets, fixed fan, and pump control.
+
+> **Important on Linux/X11.** The automatic fallback only covers the case where
+> the tray backend fails to start. If a display *is* present but no system-tray
+> host is running (no `StatusNotifierItem`/systray owner — common on minimal
+> window managers and bare X sessions), `pystray` does **not** raise: it keeps
+> retrying and logs `Failed to dock icon` on every attempt, so the tray icon
+> never appears and the app does **not** switch to console on its own. In that
+> situation run with `--no-tray` explicitly, or install a tray host (see
+> [Troubleshooting](#troubleshooting)).
+
 ## Tray menu
 
 - **Status**: current connection state
@@ -170,6 +218,14 @@ onexFrostBay/
 ├── run.sh                    # one-command launcher (venv + deps + run)
 ├── install.sh                # Fedora installer (packages, menu entry, autostart)
 ├── .gitignore
+├── frostbay-toolbox/         # terminal-only Textual TUI controller
+│   ├── run.sh                # launches the Textual TUI
+│   ├── textual_app.py        # Textual app (orange theme, dashboard, controls)
+│   ├── main.py               # legacy curses TUI (still runnable directly)
+│   ├── install.sh            # toolbox installer (packages, venv, launcher, menu)
+│   ├── install-autostart.sh  # install + autostart on login
+│   ├── disable-autostart.sh  # disable autostart
+│   └── uninstall.sh          # remove launcher/menu/autostart (--purge venv)
 └── frostbay/
     ├── __init__.py
     ├── __main__.py           # entry point for `python -m frostbay`
@@ -189,7 +245,11 @@ onexFrostBay/
   `specification.md`.
 - Writes are never a single 64-byte write; the protocol splits the patched
   payload into three 20-byte chunks prefixed with `0x1C`, `0x2C`, `0x3C`,
-  sent with ~20 ms gaps, using *Write Without Response*.
+  sent with ~20 ms gaps. The write mode is chosen from the characteristic's
+  advertised properties at connect time: *Write With Response* when the device
+  only declares `write` (macOS CoreBluetooth silently drops `write-command`
+  there), otherwise *Write Without Response*. If a write fails, the client
+  retries the other mode and keeps whichever worked.
 - Pump speed is clamped to the supported `50..100` range; the recommended
   practical range is `80..100`.
 - The **Manual settings** presets and both automation checkboxes (auto-restart,
@@ -197,3 +257,44 @@ onexFrostBay/
 - The tray icon runs on the main thread (required by `pystray`), while BLE I/O
   runs on a background asyncio loop. Actions are dispatched to that loop via
   `asyncio.run_coroutine_threadsafe`.
+
+## Troubleshooting
+
+### `Failed to dock icon` / `assert self._systray_manager` (Linux)
+
+The app started but no tray icon appears, and the log repeats
+`ERROR pystray._base: Failed to dock icon` with an `AssertionError` from
+`pystray/_xorg.py`. This means there is **no system-tray host** (no
+`StatusNotifierItem` / systray selection owner) on the current display. The
+`pystray` X11 backend catches this internally and keeps retrying, so the app
+does not fall back to console on its own.
+
+Fix by either:
+
+- running in console mode: `python -m frostbay --no-tray` (or `./run.sh --no-tray`), or
+- providing a tray host:
+  - **GNOME**: enable the *AppIndicator and KStatusNotifierItem Support*
+    extension (`gnome-shell-extension-appindicator`, installed by `install.sh`),
+    then restart GNOME Shell.
+  - **KDE Plasma**: the tray is native — make sure the system tray is shown.
+  - **Minimal WMs / bare X sessions**: install a StatusNotifier host, e.g.
+    `sudo dnf install snix-embed` and run `snix-embed python -m frostbay`,
+    or use a desktop session that provides a tray.
+
+### `No powered Bluetooth adapters found`
+
+`Auto-connect failed: 'No powered Bluetooth adapters found. Turn on Bluetooth
+and try again.'` — the machine has no usable/powered Bluetooth adapter.
+
+- Turn Bluetooth on (system menu, or `rfkill unblock bluetooth`).
+- Check adapters: `bluetoothctl list` (should show at least one powered adapter;
+  power it with `power on`).
+- On a desktop without built-in Bluetooth, plug in a USB BLE dongle.
+- The app keeps running with a red/orange icon; once the adapter is available,
+  use **Scan for devices…** / **Reconnect** in the tray (or menu `2)` in console
+  mode) to connect.
+
+### Tray icon not visible on GNOME
+
+Enable the *AppIndicator and KStatusNotifierItem Support* extension (see above).
+KDE shows the tray out of the box.

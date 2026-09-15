@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-15
+
+### Added
+
+- **Frostbay Toolbox** (`frostbay-toolbox/`): a terminal-only controller built
+  with [Textual](https://github.com/Textualize/textual), styled with an
+  orange theme (rounded orange borders, orange gauges and sparklines). It
+  exposes the full tray control surface in the terminal — scan / find &
+  connect / connect by address / disconnect / refresh / OFF / Smart
+  (silent/soft/strong) / **Auto-restart on stop** / **Auto temp** toggles /
+  manual fan-pump presets / set pump — plus a live dashboard (Fan/Pump
+  progress bars, Temp IN/OUT, Flow, Fan, Pump sparklines), host CPU/GPU
+  telemetry and an event log.
+- Toolbox lifecycle scripts:
+  - `frostbay-toolbox/install.sh` — system packages, venv + deps, a
+    `frostbay-toolbox` launcher in `~/.local/bin`, and an applications-menu
+    entry that opens the TUI in a terminal (`--autostart` also enables login
+    autostart).
+  - `frostbay-toolbox/install-autostart.sh` — install and enable autostart.
+  - `frostbay-toolbox/disable-autostart.sh` — disable autostart (keeps the
+    app installed).
+  - `frostbay-toolbox/uninstall.sh` — remove launcher, menu entry and
+    autostart (`--purge` also deletes the virtual environment).
+- `textual` added to `requirements.txt`.
+
+### Notes
+
+- The previous curses-based terminal app is retained as
+  `frostbay-toolbox/main.py` and can still be run directly; `run.sh` now
+  launches the Textual app.
+
 ## [0.3.1] - 2026-09-07
 
 ### Changed
@@ -70,7 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live auto-refresh polling and a live dashboard with unicode sparkline graphs.
 - Console controller (`--no-tray`) for headless environments.
 
-[Unreleased]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Kuznecoff/onexFrostBay/compare/5befb3c...v0.2.0
