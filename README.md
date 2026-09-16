@@ -247,6 +247,11 @@ onexFrostBay/
 
 ## Implementation notes
 
+- GATT access goes through a small transport abstraction (`frostbay/transports.py`):
+  a `BleakTransport` (WinRT / CoreBluetooth / BlueZ) and a `BluezDbusTransport`
+  that attaches to an already resolved BlueZ device and performs direct
+  `ReadValue` / `WriteValue` on `FFE1`. On Linux the D-Bus transport is used
+  when available (avoids the fresh-connect ATT `0x0E` drop); otherwise bleak.
 - The `FFE1` characteristic is read as a 64-byte state blob and parsed per
   `specification.md`.
 - Writes are never a single 64-byte write; the protocol splits the patched
@@ -299,6 +304,37 @@ and try again.'` — the machine has no usable/powered Bluetooth adapter.
 - The app keeps running with a red/orange icon; once the adapter is available,
   use **Scan for devices…** / **Reconnect** in the tray (or menu `2)` in console
   mode) to connect.
+
+### `BleakGATTProtocolErrorCode.UNLIKELY_ERROR: 14` / connects then drops instantly (Linux)
+
+ATT error `0x0E` ("Unlikely Error") means the Frostbay firmware rejected
+something the stack did during a fresh connect + full service discovery and
+dropped the link. WinRT (Windows) uses a different connect sequence and is
+unaffected. On Linux the app now uses a **direct BlueZ D-Bus transport**
+(`frostbay/transports.py`) that *attaches* to an already connected +
+`ServicesResolved` device and drives `FFE1` with direct `ReadValue` /
+`WriteValue`, instead of forcing a second user-space GATT connect (the
+model recommended in `specification.md`).
+
+If you still hit `0x0E`:
+
+1. **Let the system own the session first.** Pair and connect the device in
+   the desktop Bluetooth UI (GNOME/KDE) or `bluetoothctl connect <MAC>`,
+   so BlueZ reports `Connected=true` + `ServicesResolved=true`. The app then
+   attaches without re-triggering discovery.
+2. **Clear a stale bond/cache** from a previous dual-boot pairing:
+   `bluetoothctl remove <MAC>` → `sudo systemctl restart bluetooth` → re-pair.
+3. **Use the adapter that exposes the full GATT tree.** The built-in `hci0`
+   path was observed broken (UUID list collapses to battery/HID); an external
+   USB BLE adapter (`hci1`) exposes the correct Frostbay tree. Check with
+   `bluetoothctl list`.
+4. **Neutralize the bogus HID** (`1812`) volume-key side effect via the
+   `hwdb` override in `specification.md` (does not affect the GATT path).
+
+To force the classic bleak backend (e.g. to compare), construct the client
+with `FrostbayBLE(..., prefer_transport="bleak")`, or force the D-Bus path
+with `prefer_transport="bluez"`. Auto-selection is BlueZ-D-Bus on Linux,
+bleak elsewhere.
 
 ### Tray icon not visible on GNOME
 

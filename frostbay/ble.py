@@ -20,17 +20,16 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 try:
-    from bleak import BleakClient, BleakScanner
-    from bleak.backends.characteristic import BleakGATTCharacteristic
-    from bleak.exc import BleakError
+    from bleak import BleakScanner
 except ImportError as exc:  # pragma: no cover - import guard
     raise RuntimeError(
         "bleak is required: pip install bleak"
     ) from exc
 
+from .transports import Transport, backend_order, create_transport
+
 from .protocol import (
     FrostbayState,
-    UUID_FFE0,
     UUID_FFE1,
     UUID_FFE4,
     READBACK_DELAY_SEC,
@@ -69,11 +68,15 @@ class ScanResult:
 class FrostbayBLE:
     """High-level Frostbay BLE controller."""
 
-    def __init__(self, address: Optional[str] = None, on_state: Optional[Callable[[FrostbayState], None]] = None) -> None:
+    def __init__(
+        self,
+        address: Optional[str] = None,
+        on_state: Optional[Callable[[FrostbayState], None]] = None,
+        prefer_transport: Optional[str] = None,
+    ) -> None:
         self._address = address
-        self._client: Optional[BleakClient] = None
-        self._ffe1: Optional[BleakGATTCharacteristic] = None
-        self._ffe4: Optional[BleakGATTCharacteristic] = None
+        self._prefer_transport = prefer_transport
+        self._transport: Optional[Transport] = None
         self._on_state = on_state
         self._lock = asyncio.Lock()
         self._connected = False
@@ -82,7 +85,7 @@ class FrostbayBLE:
         # (macOS CoreBluetooth) silently drop WRITE_COMMAND to a char that only
         # declares WRITE, which made commands appear to do nothing.
         self._write_with_response = True
-        self._stop_notifications = None
+        self._notify_started = False
         # Strong references to in-flight notification-triggered refresh tasks,
         # so they are not garbage-collected before completion.
         self._notify_tasks: set[asyncio.Task] = set()
@@ -93,7 +96,7 @@ class FrostbayBLE:
     # --- status ---------------------------------------------------------
     @property
     def is_connected(self) -> bool:
-        return self._connected and self._client is not None and self._client.is_connected
+        return self._connected and self._transport is not None and self._transport.is_connected
 
     @property
     def address(self) -> Optional[str]:
@@ -156,42 +159,50 @@ class FrostbayBLE:
         self._address = addr
 
         last_exc: Optional[Exception] = None
-        for attempt in range(1, max(1, attempts) + 1):
-            try:
-                logger.info("Connecting to %s (attempt %d/%d) ...", addr, attempt, attempts)
-                # Restrict discovery to the Frostbay FFE0 primary service. Over
-                # BlueZ the device can answer a service enumeration with an ATT
-                # "Unlikely Error" (0x0E) and drop the link before
-                # ServicesResolved becomes true, which surfaces as
-                # "failed to discover services" / "Service Discovery has not
-                # been performed yet". Asking only for FFE0 (which carries
-                # FFE1/FFE4) narrows what we need, and the retry below rides out
-                # the transient failure.
-                self._client = BleakClient(addr, services=[UUID_FFE0], timeout=timeout)
-                await self._client.connect()
-                await self._resolve_chars()
-                self._connected = True
-                last_exc = None
-                logger.info("Connected to Frostbay at %s", addr)
-                break
-            except Exception as exc:
-                last_exc = exc
-                logger.warning(
-                    "Connect attempt %d/%d failed: %s", attempt, attempts, exc
-                )
-                # Tear down any half-open link so BlueZ does not keep a stale
-                # connection that blocks the next Connect call.
+        connected_ok = False
+        for backend in backend_order(self._prefer_transport):
+            for attempt in range(1, max(1, attempts) + 1):
+                transport: Optional[Transport] = None
                 try:
-                    if self._client is not None:
-                        await self._client.disconnect()
-                except Exception:
-                    pass
-                self._client = None
-                self._connected = False
-                if attempt < attempts:
-                    await asyncio.sleep(0.6)
+                    logger.info(
+                        "Connecting to %s via %s (attempt %d/%d) ...",
+                        addr, backend, attempt, attempts,
+                    )
+                    # On Linux the "bluez" backend attaches to an already
+                    # connected + resolved device and drives FFE1 via direct
+                    # D-Bus ReadValue/WriteValue, avoiding the fresh connect +
+                    # full ATT discovery the Frostbay firmware can reject with
+                    # an Unlikely Error (0x0E). "bleak" is the classic client.
+                    transport = create_transport(backend)
+                    await transport.connect(addr, timeout)
+                    self._transport = transport
+                    self._resolve_chars()
+                    self._connected = True
+                    last_exc = None
+                    connected_ok = True
+                    logger.info("Connected to Frostbay at %s (via %s)", addr, backend)
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "Connect via %s attempt %d/%d failed: %s",
+                        backend, attempt, attempts, exc,
+                    )
+                    # Tear down any half-open link so the stack does not keep a
+                    # stale connection that blocks the next Connect call.
+                    if transport is not None:
+                        try:
+                            await transport.disconnect()
+                        except Exception:
+                            pass
+                    self._transport = None
+                    self._connected = False
+                    if attempt < attempts:
+                        await asyncio.sleep(0.6)
+            if connected_ok:
+                break
 
-        if last_exc is not None:
+        if not connected_ok and last_exc is not None:
             raise last_exc
 
         # Initial state read + notification subscription.
@@ -214,7 +225,7 @@ class FrostbayBLE:
             await self.stop_polling()
         except Exception:
             pass
-        if self._client is None:
+        if self._transport is None:
             self._connected = False
             return
         try:
@@ -222,51 +233,37 @@ class FrostbayBLE:
         except Exception:
             pass
         try:
-            await self._client.disconnect()
+            await self._transport.disconnect()
         except Exception as exc:
             logger.warning("Disconnect error: %s", exc)
         self._connected = False
-        self._ffe1 = None
-        self._ffe4 = None
+        self._transport = None
         logger.info("Disconnected")
 
-    async def _resolve_chars(self) -> None:
-        if self._client is None:
+    def _resolve_chars(self) -> None:
+        if self._transport is None:
             raise RuntimeError("Client not connected")
-        # bleak >= 3.0 performs service discovery during connect(); the
-        # `.services` property is populated right after, so no explicit
-        # get_services() call is needed (it was removed in bleak 3.x).
-        ffe1 = self._find_char(UUID_FFE1)
-        if ffe1 is None:
+        if not self._transport.has_characteristic(UUID_FFE1):
             raise RuntimeError(f"Characteristic {UUID_FFE1} not found on the device")
-        self._ffe1 = ffe1
-        self._ffe4 = self._find_char(UUID_FFE4)
         # Pick a write mode the characteristic actually advertises. If it only
         # supports WRITE (with response), sending WRITE_COMMAND is dropped by
         # CoreBluetooth and commands never reach the device.
-        try:
-            props = set(self._ffe1.properties or [])
-        except Exception:
-            props = set()
+        props = self._transport.characteristic_properties(UUID_FFE1)
         self._write_with_response = "write" in props and "write-without-response" not in props
         logger.info(
             "FFE1 properties=%s -> write with response=%s",
             sorted(props) if props else "?",
             self._write_with_response,
         )
-        logger.debug("Resolved FFE1=%s FFE4=%s", bool(self._ffe1), bool(self._ffe4))
-
-    def _find_char(self, uuid: str) -> Optional[BleakGATTCharacteristic]:
-        assert self._client is not None
-        for service in self._client.services:
-            for char in service.characteristics:
-                if char.uuid.lower() == uuid.lower():
-                    return char
-        return None
+        logger.debug(
+            "Resolved FFE1=%s FFE4=%s",
+            self._transport.has_characteristic(UUID_FFE1),
+            self._transport.has_characteristic(UUID_FFE4),
+        )
 
     # --- notifications --------------------------------------------------
     async def _start_notifications(self) -> None:
-        if self._ffe4 is None:
+        if self._transport is None or not self._transport.has_characteristic(UUID_FFE4):
             return
 
         async def _safe_refresh() -> None:
@@ -275,36 +272,37 @@ class FrostbayBLE:
             except Exception as exc:
                 logger.debug("Notification-triggered refresh failed: %s", exc)
 
-        async def _handler(sender, data: bytearray) -> None:
-            logger.debug("Notification from %s: %d bytes", sender, len(data))
+        def _handler(char_uuid: str, data: bytearray) -> None:
+            logger.debug("Notification from %s: %d bytes", char_uuid, len(data))
             # Notifications from FFE4 may indicate a state change; refresh FFE1.
-            # Run in the background (bleak does not await handlers); keep a
-            # reference so the task is not garbage-collected mid-flight and
+            # Run in the background (the transport does not await handlers); keep
+            # a reference so the task is not garbage-collected mid-flight and
             # its exceptions are always consumed by _safe_refresh.
             task = asyncio.create_task(_safe_refresh())
             self._notify_tasks.add(task)
             task.add_done_callback(self._notify_tasks.discard)
 
         try:
-            await self._client.start_notify(self._ffe4, _handler)
-            self._stop_notifications = lambda: self._client and self._client.stop_notify(self._ffe4)
+            await self._transport.start_notify(UUID_FFE4, _handler)
+            self._notify_started = True
         except Exception as exc:
             logger.debug("Could not start notify on FFE4: %s", exc)
+            self._notify_started = False
 
     async def _stop_notifications_safe(self) -> None:
-        if self._stop_notifications is not None:
+        if self._notify_started and self._transport is not None:
             try:
-                await self._stop_notifications()
+                await self._transport.stop_notify(UUID_FFE4)
             except Exception:
                 pass
-            self._stop_notifications = None
+        self._notify_started = False
 
     # --- core read / write ---------------------------------------------
     async def _read_state_locked(self) -> FrostbayState:
         """Read FFE1. Caller must hold ``self._lock``."""
-        if self._ffe1 is None:
+        if self._transport is None or not self._transport.has_characteristic(UUID_FFE1):
             raise RuntimeError("Not connected or FFE1 not resolved")
-        data = await self._client.read_gatt_char(self._ffe1)
+        data = await self._transport.read(UUID_FFE1)
         logger.debug("Read FFE1: %d bytes: %s", len(data), data.hex())
         state = FrostbayState.from_raw(bytes(data))
         if self._on_state:
@@ -324,7 +322,7 @@ class FrostbayBLE:
 
     async def _write_state_locked(self, state: bytearray) -> None:
         """Write FFE1 in chunks. Caller must hold ``self._lock``."""
-        if self._ffe1 is None:
+        if self._transport is None or not self._transport.has_characteristic(UUID_FFE1):
             raise RuntimeError("Not connected or FFE1 not resolved")
         chunks = encode_write_chunks(state)
         for idx, chunk in enumerate(chunks):
@@ -333,7 +331,7 @@ class FrostbayBLE:
                 idx + 1, len(chunk), self._write_with_response, chunk.hex(),
             )
             try:
-                await self._client.write_gatt_char(self._ffe1, chunk, response=self._write_with_response)
+                await self._transport.write(UUID_FFE1, chunk, self._write_with_response)
             except Exception as exc:
                 # Fallback to the other write mode in case property detection
                 # was wrong; re-raise if both fail.
@@ -341,7 +339,7 @@ class FrostbayBLE:
                     "Write with response=%s failed (%s); retrying with the other mode",
                     self._write_with_response, exc,
                 )
-                await self._client.write_gatt_char(self._ffe1, chunk, response=not self._write_with_response)
+                await self._transport.write(UUID_FFE1, chunk, not self._write_with_response)
                 # Stick with whichever mode actually worked for remaining chunks.
                 self._write_with_response = not self._write_with_response
             if idx < len(chunks) - 1:
@@ -386,7 +384,7 @@ class FrostbayBLE:
         assert self._poll_stop is not None
         while not self._poll_stop.is_set():
             try:
-                if self.is_connected and self._ffe1 is not None:
+                if self.is_connected and self._transport is not None and self._transport.has_characteristic(UUID_FFE1):
                     await self.read_state()
             except Exception as exc:
                 logger.debug("Poll tick error: %s", exc)

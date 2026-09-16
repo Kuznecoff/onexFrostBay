@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-16
+
+### Added
+
+- **Direct BlueZ D-Bus transport on Linux.** GATT access is now behind a small
+  transport abstraction (`frostbay/transports.py`): a `BleakTransport`
+  (WinRT / CoreBluetooth / BlueZ) and a `BluezDbusTransport` that *attaches*
+  to an already connected + `ServicesResolved` BlueZ device and drives `FFE1`
+  with direct `ReadValue` / `WriteValue`, per the model in `specification.md`.
+  On Linux the D-Bus transport is tried first (it avoids the fresh connect +
+  full ATT discovery that the Frostbay firmware can reject with an
+  `Unlikely Error` (0x0E) and drop the link), then falls back to bleak. A
+  stale half-open link (connected but not resolved) is cleared before
+  attaching. Backend can be forced with
+  `FrostbayBLE(..., prefer_transport="bleak"|"bluez")`.
+
 ## [0.4.1] - 2026-09-15
 
 ### Fixed
