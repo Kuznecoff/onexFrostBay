@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-17
+
+### Added
+
+- Toolbox connection switch **Legacy 0.4.1 (Bleak)** and `--legacy-041`
+  launch option. Legacy mode forces Bleak with FFE0-scoped discovery;
+  automatic transport selection remains the default. Switching modes
+  disconnects the current session and clears its telemetry.
+- Headless Toolbox tests for mode selection, switching, and the launch flag,
+  plus regression coverage for the legacy Bleak transport.
+
+### Fixed
+
+- A disconnect during notification setup now fails the connection attempt
+  and triggers cleanup/retry instead of reporting a successful connection.
+- Toolbox uses a separate BLE event-loop attribute so Textual cannot
+  overwrite it with the UI loop and cause BLE command timeouts.
+- Toolbox serializes BLE actions and background polling during mode changes.
+
+### Notes
+
+- The device command format is unchanged. Physical-device validation is
+  still required for both connection modes.
+
 ## [0.5.1] - 2026-09-17
 
 ### Fixed

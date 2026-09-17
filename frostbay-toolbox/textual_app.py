@@ -204,12 +204,14 @@ class FrostbayTextualApp(App):
         ("s", "scan", "Scan"),
     ]
 
-    def __init__(self, address: Optional[str] = None) -> None:
+    def __init__(self, address: Optional[str] = None, legacy_041: bool = False) -> None:
         super().__init__()
         self.title = "Frostbay"
         self.sub_title = "BLE cooling controller"
         self.address = address
-        self.ble = FrostbayBLE(address=address)
+        self.legacy_041 = legacy_041
+        self.ble = FrostbayBLE(address=address, prefer_transport="bleak" if legacy_041 else None)
+        self._ble_operation_lock = threading.Lock()
         self.history = History()
         self.state: Optional[FrostbayState] = None
         self.devices: list[str] = []
@@ -228,13 +230,13 @@ class FrostbayTextualApp(App):
         self._bg_stop = threading.Event()
         self._bg_thread: Optional[threading.Thread] = None
 
-        self._loop = asyncio.new_event_loop()
-        self._loop_thread = threading.Thread(target=self._loop.run_forever, daemon=True)
-        self._loop_thread.start()
+        self._ble_loop = asyncio.new_event_loop()
+        self._ble_loop_thread = threading.Thread(target=self._ble_loop.run_forever, daemon=True)
+        self._ble_loop_thread.start()
 
     # ---- async bridge ----
     def _run_async(self, coro):
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=25)
+        return asyncio.run_coroutine_threadsafe(coro, self._ble_loop).result(timeout=25)
 
     def _log(self, message: str) -> None:
         self.logbuf.append(message)
@@ -312,6 +314,24 @@ class FrostbayTextualApp(App):
         self.state = None
         self.status = "Disconnected"
         self._log("Disconnected")
+
+    def _do_set_legacy_mode(self, enabled: bool) -> None:
+        if enabled == self.legacy_041:
+            return
+        self._do_disconnect()
+        self.ble = FrostbayBLE(
+            address=self.address, prefer_transport="bleak" if enabled else None,
+        )
+        self.legacy_041 = enabled
+        self.history = History()
+        self._was_running = False
+        self._log(f"Connection mode: {'Legacy 0.4.1 (Bleak)' if enabled else 'Auto'}")
+
+    def _finish_mode_switch(self) -> None:
+        switch = self.query_one("#legacy_041", Switch)
+        with switch.prevent(Switch.Changed):
+            switch.value = self.legacy_041
+        switch.disabled = False
 
     def _do_off(self) -> None:
         self._note_command()
@@ -415,20 +435,24 @@ class FrostbayTextualApp(App):
     @work(thread=True, exclusive=True, group="ble")
     def _w(self, fn, *args) -> None:
         try:
-            fn(*args)
+            with self._ble_operation_lock:
+                fn(*args)
         except Exception as exc:
             self.status = f"Error: {exc}"
             self._log(str(exc))
+        if fn == self._do_set_legacy_mode:
+            self.call_from_thread(self._finish_mode_switch)
         self.call_from_thread(self._update_ui)
 
     # ---- background periodic loop ----
     def _bg_loop(self) -> None:
         while not self._bg_stop.is_set():
             try:
-                if self.ble.is_connected:
-                    self._refresh_state()
-                    self._maybe_auto_restart()
-                    self._thermal_tick()
+                with self._ble_operation_lock:
+                    if self.ble.is_connected:
+                        self._refresh_state()
+                        self._maybe_auto_restart()
+                        self._thermal_tick()
             except Exception as exc:
                 self.status = f"Tick error: {exc}"
             try:
@@ -443,6 +467,9 @@ class FrostbayTextualApp(App):
         with Horizontal(id="main"):
             with VerticalScroll(id="controls"):
                 yield Static("CONNECTION", classes="section-title")
+                with Horizontal(classes="switch-row"):
+                    yield Switch(value=self.legacy_041, id="legacy_041")
+                    yield Static("Legacy 0.4.1 (Bleak)")
                 yield Button("Scan for devices", id="scan")
                 yield Button(f"Find & connect (*{FROSTBAY_NAME_PART}*)", id="find")
                 with Horizontal(classes="input-row"):
@@ -607,7 +634,11 @@ class FrostbayTextualApp(App):
             self._w(self._do_fixed, int(fan), int(pump))
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
-        if event.switch.id == "auto_restart":
+        if event.switch.id == "legacy_041":
+            if event.value != self.legacy_041:
+                event.switch.disabled = True
+                self._w(self._do_set_legacy_mode, event.value)
+        elif event.switch.id == "auto_restart":
             self.auto_restart_enabled = event.value
             self._log(f"Auto-restart {'enabled' if event.value else 'disabled'}")
         elif event.switch.id == "auto_temp":
@@ -636,8 +667,12 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Frostbay Textual controller")
     parser.add_argument("--address", help="BLE address to connect to")
+    parser.add_argument(
+        "--legacy-041", action="store_true",
+        help="Use the 0.4.1 Bleak connection mode instead of automatic transport selection",
+    )
     args = parser.parse_args()
-    FrostbayTextualApp(address=args.address).run()
+    FrostbayTextualApp(address=args.address, legacy_041=args.legacy_041).run()
     return 0
 
 

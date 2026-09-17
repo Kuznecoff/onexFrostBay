@@ -30,3 +30,23 @@ python main.py
 ## Notes
 
 This app reuses the core Frostbay BLE protocol implementation from the main project, but it does not depend on any system tray backend.
+
+## Textual Connection Modes
+
+The Textual dashboard launched by `./frostbay-toolbox/run.sh` has a
+**Legacy 0.4.1 (Bleak)** switch in **CONNECTION**:
+
+- Off (default): automatic transport selection, direct BlueZ first on Linux
+	with Bleak as fallback.
+- On: Bleak only, with FFE0-scoped discovery as in version 0.4.1.
+
+Changing modes disconnects the current session and clears its telemetry.
+Use **Connect** or **Find & connect** afterwards. The selection lasts for the
+current application session. To start in legacy mode:
+
+```bash
+./frostbay-toolbox/run.sh --legacy-041
+```
+
+The Frostbay command format is unchanged from 0.4.1; this option selects the
+older connection backend, retaining the current connection checks and fixes.

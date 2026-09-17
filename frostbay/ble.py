@@ -181,6 +181,12 @@ class FrostbayBLE:
                     await self.refresh_state()
                     if not self.is_connected:
                         raise RuntimeError("Device disconnected during initial state read")
+                    try:
+                        await self._start_notifications()
+                    except Exception as exc:
+                        logger.warning("Notification subscription failed: %s", exc)
+                    if not self.is_connected:
+                        raise RuntimeError("Device disconnected during notification setup")
                     last_exc = None
                     connected_ok = True
                     logger.info("Connected to Frostbay at %s (via %s)", addr, backend)
@@ -200,6 +206,7 @@ class FrostbayBLE:
                             pass
                     self._transport = None
                     self._connected = False
+                    self._notify_started = False
                     if attempt < attempts:
                         await asyncio.sleep(0.6)
             if connected_ok:
@@ -208,10 +215,6 @@ class FrostbayBLE:
         if not connected_ok and last_exc is not None:
             raise last_exc
 
-        try:
-            await self._start_notifications()
-        except Exception as exc:
-            logger.warning("Notification subscription failed: %s", exc)
         # Start background auto-polling for live parameter updates.
         try:
             await self.start_polling(interval=self._poll_interval)

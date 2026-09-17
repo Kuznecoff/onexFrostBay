@@ -5,12 +5,14 @@ from unittest.mock import AsyncMock, Mock, patch
 from dbus_fast import Message, Variant
 
 from frostbay.ble import FrostbayBLE
-from frostbay.protocol import UUID_FFE1
+from frostbay.protocol import UUID_FFE0, UUID_FFE1
 from frostbay.transports import (
+    BleakTransport,
     BluezDbusTransport,
     DEVICE_INTERFACE,
     GATT_CHARACTERISTIC_INTERFACE,
     PROPERTIES_INTERFACE,
+    backend_order,
 )
 
 
@@ -119,6 +121,32 @@ class BluezTransportTests(unittest.IsolatedAsyncioTestCase):
             await transport._get_prop(DEVICE_PATH, DEVICE_INTERFACE, "ServicesResolved")
 
 
+class LegacyTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_uses_bleak_with_ffe0_discovery_and_ffe1_io(self):
+        characteristic = SimpleNamespace(uuid=UUID_FFE1, properties=["read", "write"])
+        client = SimpleNamespace(
+            connect=AsyncMock(), disconnect=AsyncMock(), is_connected=True,
+            services=[SimpleNamespace(characteristics=[characteristic])],
+            read_gatt_char=AsyncMock(return_value=b"state"), write_gatt_char=AsyncMock(),
+        )
+        with (
+            patch("frostbay.transports.bluez_dbus_available", return_value=True),
+            patch("bleak.BleakClient", return_value=client) as factory,
+        ):
+            self.assertEqual(backend_order("bleak"), ["bleak"])
+            transport = BleakTransport()
+            await transport.connect(ADDRESS, timeout=10.0)
+
+        factory.assert_called_once_with(ADDRESS, services=[UUID_FFE0], timeout=10.0)
+        self.assertTrue(transport.is_connected)
+        self.assertEqual(await transport.read(UUID_FFE1), b"state")
+        await transport.write(UUID_FFE1, b"command", response=True)
+        client.read_gatt_char.assert_awaited_once_with(characteristic)
+        client.write_gatt_char.assert_awaited_once_with(characteristic, b"command", response=True)
+        await transport.disconnect()
+        client.disconnect.assert_awaited_once()
+
+
 class FrostbayConnectionTests(unittest.IsolatedAsyncioTestCase):
     def make_client(self):
         client = FrostbayBLE(ADDRESS, prefer_transport="bluez")
@@ -165,6 +193,41 @@ class FrostbayConnectionTests(unittest.IsolatedAsyncioTestCase):
         failed_transport.disconnect.assert_awaited_once()
         working_transport.disconnect.assert_not_awaited()
         client._start_notifications.assert_awaited_once()
+        client.start_polling.assert_awaited_once()
+
+    async def test_disconnect_during_notification_setup_is_retried(self):
+        client = self.make_client()
+        failed_transport = self.make_transport()
+        working_transport = self.make_transport()
+
+        async def start_notifications():
+            if client._transport is failed_transport:
+                failed_transport.is_connected = False
+                raise RuntimeError("BlueZ connection lost")
+
+        client._start_notifications.side_effect = start_notifications
+        with (
+            patch("frostbay.ble.create_transport", side_effect=[failed_transport, working_transport]),
+            patch("frostbay.ble.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await client.connect(attempts=2)
+
+        self.assertTrue(client.is_connected)
+        self.assertIs(client._transport, working_transport)
+        failed_transport.disconnect.assert_awaited_once()
+        self.assertEqual(client._start_notifications.await_count, 2)
+        client.start_polling.assert_awaited_once()
+
+    async def test_notification_error_with_live_connection_is_optional(self):
+        client = self.make_client()
+        transport = self.make_transport()
+        client._start_notifications.side_effect = RuntimeError("Notify unsupported")
+
+        with patch("frostbay.ble.create_transport", return_value=transport):
+            await client.connect(attempts=1)
+
+        self.assertTrue(client.is_connected)
+        transport.disconnect.assert_not_awaited()
         client.start_polling.assert_awaited_once()
 
 
