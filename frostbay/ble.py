@@ -191,6 +191,16 @@ class FrostbayBLE:
                     connected_ok = True
                     logger.info("Connected to Frostbay at %s (via %s)", addr, backend)
                     break
+                except asyncio.CancelledError:
+                    if transport is not None:
+                        try:
+                            await transport.disconnect()
+                        except Exception as exc:
+                            logger.debug("Cancelled connection cleanup failed: %s", exc)
+                    self._transport = None
+                    self._connected = False
+                    self._notify_started = False
+                    raise
                 except Exception as exc:
                     last_exc = exc
                     logger.warning(

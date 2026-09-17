@@ -235,8 +235,14 @@ class FrostbayTextualApp(App):
         self._ble_loop_thread.start()
 
     # ---- async bridge ----
-    def _run_async(self, coro):
-        return asyncio.run_coroutine_threadsafe(coro, self._ble_loop).result(timeout=25)
+    def _run_async(self, coro, timeout: float = 25.0):
+        async def run_with_timeout():
+            try:
+                return await asyncio.wait_for(coro, timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError(f"BLE operation timed out after {timeout:g}s") from exc
+
+        return asyncio.run_coroutine_threadsafe(run_with_timeout(), self._ble_loop).result()
 
     def _log(self, message: str) -> None:
         self.logbuf.append(message)
@@ -290,7 +296,7 @@ class FrostbayTextualApp(App):
         self.status = "Scan finished"
 
     def _do_find_connect(self) -> None:
-        found = self._run_async(self.ble.find_and_connect(timeout=10.0))
+        found = self._run_async(self.ble.find_and_connect(timeout=10.0), timeout=240.0)
         self.address = found.address
         self.devices = []
         self._refresh_state()
@@ -302,7 +308,7 @@ class FrostbayTextualApp(App):
             self._log("Empty address")
             self.status = "Empty address"
             return
-        self._run_async(self.ble.connect(address=addr))
+        self._run_async(self.ble.connect(address=addr), timeout=240.0)
         self.address = addr
         self.devices = []
         self._refresh_state()

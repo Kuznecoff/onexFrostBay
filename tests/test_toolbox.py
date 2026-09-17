@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import unittest
 from pathlib import Path
@@ -13,6 +14,22 @@ SPEC.loader.exec_module(toolbox)
 
 
 class ToolboxConnectionModeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bridge_timeout_waits_for_cancellation_cleanup(self):
+        app = self.make_app()
+        cleaned_up = []
+
+        async def operation():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                cleaned_up.append(True)
+
+        with self.assertRaisesRegex(TimeoutError, "BLE operation timed out"):
+            app._run_async(operation(), timeout=0.01)
+
+        self.assertEqual(cleaned_up, [True])
+
     def make_app(self, legacy_041=False):
         app = toolbox.FrostbayTextualApp(address="C8:17:17:F5:C8:93", legacy_041=legacy_041)
         app._bg_loop = Mock()

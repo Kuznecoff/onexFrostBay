@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-17
+
+### Fixed
+
+- Linux legacy Bleak connections prefer an already connected, resolved BlueZ
+  device exposing FFE1, preserving its adapter and avoiding an implicit scan.
+  Without a ready session, the normal Bleak connection path remains in use.
+- Toolbox allows up to 240 seconds for discovery and connection retries instead
+  of abandoning them after 25 seconds. Timed-out operations are cancelled and
+  awaited; cancelled connection attempts clean up their transport before exit.
+- Detect a disconnect after Bleak connect before accessing its service cache.
+
+### Notes
+
+- Windows connection behavior and the device command format are unchanged.
+  Physical-device validation is still required for Linux ATT error 0x0E.
+
 ## [0.5.2] - 2026-09-17
 
 ### Added

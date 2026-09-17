@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -122,6 +123,78 @@ class BluezTransportTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LegacyTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_linux_passes_ready_device_to_bleak_without_scanning(self):
+        device = SimpleNamespace(address=ADDRESS)
+        client = SimpleNamespace(connect=AsyncMock(), is_connected=True, services=[])
+        with (
+            patch("frostbay.transports.sys.platform", "linux"),
+            patch("bleak.BleakClient", return_value=client) as factory,
+            patch.object(BleakTransport, "_ready_bluez_device", return_value=device) as lookup,
+        ):
+            await BleakTransport().connect(ADDRESS, timeout=10.0)
+
+        lookup.assert_awaited_once_with(ADDRESS)
+        factory.assert_called_once_with(device, services=[UUID_FFE0], timeout=10.0)
+        client.connect.assert_awaited_once_with()
+
+    async def test_linux_falls_back_to_address_without_ready_session(self):
+        for lookup_result in (None, RuntimeError("D-Bus unavailable")):
+            with self.subTest(result=lookup_result):
+                client = SimpleNamespace(connect=AsyncMock(), is_connected=True, services=[])
+                with (
+                    patch("frostbay.transports.sys.platform", "linux"),
+                    patch("bleak.BleakClient", return_value=client) as factory,
+                    patch.object(BleakTransport, "_ready_bluez_device", side_effect=[lookup_result]),
+                ):
+                    await BleakTransport().connect(ADDRESS, timeout=10.0)
+
+                factory.assert_called_once_with(ADDRESS, services=[UUID_FFE0], timeout=10.0)
+
+    async def test_ready_lookup_prefers_resolved_adapter_and_only_closes_bus(self):
+        probe = BluezTransportTests().make_transport()
+        probe._MessageBus.return_value.disconnect = Mock()
+        objects = probe._managed_objects.return_value
+        other_device = DEVICE_PATH.replace("hci0", "hci1")
+        other_char = CHAR_PATH.replace("hci0", "hci1")
+        objects[other_device] = objects[DEVICE_PATH]
+        objects[other_char] = objects.pop(CHAR_PATH)
+        with patch("frostbay.transports.BluezDbusTransport", return_value=probe):
+            device = await BleakTransport()._ready_bluez_device(ADDRESS)
+
+        self.assertEqual(device.details["path"], other_device)
+        probe._MessageBus.return_value.disconnect.assert_called_once()
+        probe._call.assert_not_awaited()
+
+    async def test_ready_lookup_rejects_incomplete_sessions(self):
+        for missing in ("device", "Connected", "ServicesResolved", "FFE1"):
+            with self.subTest(missing=missing):
+                probe = BluezTransportTests().make_transport()
+                probe._MessageBus.return_value.disconnect = Mock()
+                objects = probe._managed_objects.return_value
+                if missing == "device":
+                    objects.clear()
+                elif missing == "FFE1":
+                    del objects[CHAR_PATH]
+                else:
+                    objects[DEVICE_PATH][DEVICE_INTERFACE][missing] = False
+                with patch("frostbay.transports.BluezDbusTransport", return_value=probe):
+                    self.assertIsNone(await BleakTransport()._ready_bluez_device(ADDRESS))
+
+                probe._MessageBus.return_value.disconnect.assert_called_once()
+                probe._call.assert_not_awaited()
+
+    async def test_disconnected_client_is_not_queried_for_services(self):
+        client = SimpleNamespace(connect=AsyncMock(), is_connected=False)
+        with (
+            patch("frostbay.transports.sys.platform", "win32"),
+            patch("bleak.BleakClient", return_value=client),
+        ):
+            transport = BleakTransport()
+            with self.assertRaisesRegex(RuntimeError, "disconnected during GATT discovery"):
+                await transport.connect(ADDRESS, timeout=10.0)
+
+        self.assertFalse(transport.is_connected)
+
     async def test_legacy_uses_bleak_with_ffe0_discovery_and_ffe1_io(self):
         characteristic = SimpleNamespace(uuid=UUID_FFE1, properties=["read", "write"])
         client = SimpleNamespace(
@@ -130,6 +203,8 @@ class LegacyTransportTests(unittest.IsolatedAsyncioTestCase):
             read_gatt_char=AsyncMock(return_value=b"state"), write_gatt_char=AsyncMock(),
         )
         with (
+            patch("frostbay.transports.sys.platform", "win32"),
+            patch.object(BleakTransport, "_ready_bluez_device") as lookup,
             patch("frostbay.transports.bluez_dbus_available", return_value=True),
             patch("bleak.BleakClient", return_value=client) as factory,
         ):
@@ -138,6 +213,7 @@ class LegacyTransportTests(unittest.IsolatedAsyncioTestCase):
             await transport.connect(ADDRESS, timeout=10.0)
 
         factory.assert_called_once_with(ADDRESS, services=[UUID_FFE0], timeout=10.0)
+        lookup.assert_not_awaited()
         self.assertTrue(transport.is_connected)
         self.assertEqual(await transport.read(UUID_FFE1), b"state")
         await transport.write(UUID_FFE1, b"command", response=True)
@@ -148,6 +224,23 @@ class LegacyTransportTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FrostbayConnectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_connection_cleans_up_without_retry(self):
+        for stage in ("connect", "read"):
+            with self.subTest(stage=stage):
+                client = self.make_client()
+                transport = self.make_transport()
+                operation = transport.connect if stage == "connect" else client.refresh_state
+                operation.side_effect = asyncio.CancelledError()
+                with patch("frostbay.ble.create_transport", return_value=transport) as factory:
+                    with self.assertRaises(asyncio.CancelledError):
+                        await client.connect()
+
+                factory.assert_called_once()
+                transport.disconnect.assert_awaited_once()
+                self.assertFalse(client.is_connected)
+                self.assertIsNone(client._transport)
+                client.start_polling.assert_not_awaited()
+
     def make_client(self):
         client = FrostbayBLE(ADDRESS, prefer_transport="bluez")
         client.refresh_state = AsyncMock()

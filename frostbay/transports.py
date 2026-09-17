@@ -88,21 +88,56 @@ class BleakTransport(Transport):
     Mirrors the historical behaviour of :class:`FrostbayBLE`: a fresh
     ``BleakClient`` connect scoped to the ``FFE0`` primary service, with
     the characteristic objects resolved from the discovered service tree.
+    On Linux, prefer an already resolved BlueZ device path to avoid an
+    implicit scan and preserve the adapter that exposes FFE1.
     """
 
     def __init__(self) -> None:
         from bleak import BleakClient  # local import: keeps module import cheap
 
-        self._client = BleakClient
+        self._client_factory = BleakClient
+        self._client = None
         self._chars: dict[str, object] = {}
         self._connected = False
 
+    async def _ready_bluez_device(self, address: str):
+        from bleak.backends.device import BLEDevice
+
+        transport = BluezDbusTransport()
+        bus = transport._MessageBus(bus_type=transport._dbus.BusType.SYSTEM)
+        transport._bus = bus
+        try:
+            await bus.connect()
+            objects = await transport._managed_objects()
+            path = await transport._find_device_path(address, objects)
+            if path is None:
+                return None
+            props = objects[path][DEVICE_INTERFACE]
+            transport._resolve_chars(path, objects)
+            if not (
+                props.get("Connected") and props.get("ServicesResolved")
+                and transport.has_characteristic(UUID_FFE1)
+            ):
+                return None
+            logger.info("Bleak using resolved BlueZ device %s", path)
+            return BLEDevice(address, props.get("Name"), {"path": path, "props": props})
+        finally:
+            bus.disconnect()
+
     async def connect(self, address: str, timeout: float) -> None:
-        # Restrict discovery to the Frostbay FFE0 primary service (carries
-        # FFE1/FFE4). See the note in FrostbayBLE.connect for why.
-        self._client = self._client(address, services=[UUID_FFE0], timeout=timeout)
+        device = address
+        if sys.platform == "linux":
+            try:
+                device = await asyncio.wait_for(
+                    self._ready_bluez_device(address), timeout=min(5.0, timeout),
+                ) or address
+            except Exception as exc:
+                logger.debug("Ready BlueZ device lookup failed; using Bleak scan: %s", exc)
+        self._client = self._client_factory(device, services=[UUID_FFE0], timeout=timeout)
         await self._client.connect()
         self._chars = {}
+        if not self._client.is_connected:
+            raise RuntimeError("Bleak disconnected during GATT discovery")
         for service in self._client.services:
             for char in service.characteristics:
                 self._chars[char.uuid.lower()] = char

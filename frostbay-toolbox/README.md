@@ -50,3 +50,18 @@ current application session. To start in legacy mode:
 
 The Frostbay command format is unchanged from 0.4.1; this option selects the
 older connection backend, retaining the current connection checks and fixes.
+
+On Linux, legacy mode first looks for an already connected BlueZ device with
+resolved services and FFE1, and passes that device's adapter path to Bleak.
+Otherwise it uses Bleak's normal scan/connect flow. Reads and writes remain
+on Bleak in both cases; Windows behavior is unchanged. The FFE0 filter does
+not limit BlueZ's over-the-air service discovery.
+
+Connection attempts can take up to four minutes including retries. A timeout
+cancels the operation and waits for cleanup before another action runs.
+If `GATT Protocol Error: Unlikely Error` (0x0E) persists, try connecting the
+device through the Linux Bluetooth settings before starting legacy mode.
+This requires BlueZ to expose FFE1; the application cannot use an incomplete
+service tree. Capture `bluetoothctl info <address>` and
+`journalctl -u bluetooth -b --since "5 minutes ago" --no-pager` after a failure
+to distinguish discovery/adapter problems from application errors.
