@@ -19,8 +19,8 @@ Tested targets: **Windows 10/11**, **macOS**, **Fedora Linux**.
   - 🔴 red    — disconnected / connection error
   - ⚪ grey   — idle / scanning
   - 🟠 orange — error
-- BLE scan and connect (via `bleak`, works on Windows/macOS/Fedora), with
-  automatic connect retries that ride out transient BlueZ service-discovery errors
+- BLE scanning via `bleak`; connections prefer direct BlueZ D-Bus on Linux
+  and use Bleak on Windows/macOS, with retries for connection/initial-read errors
 - **Automatic device discovery** by advertised name substring `ONEC1`
   (e.g. `CoolingSystem_ONEC1`). On startup the app scans for a device whose
   name contains `ONEC1` (case-insensitive) and connects to the first match.
@@ -307,14 +307,20 @@ and try again.'` — the machine has no usable/powered Bluetooth adapter.
 
 ### `BleakGATTProtocolErrorCode.UNLIKELY_ERROR: 14` / connects then drops instantly (Linux)
 
-ATT error `0x0E` ("Unlikely Error") means the Frostbay firmware rejected
-something the stack did during a fresh connect + full service discovery and
-dropped the link. WinRT (Windows) uses a different connect sequence and is
-unaffected. On Linux the app now uses a **direct BlueZ D-Bus transport**
+ATT error `0x0E` ("Unlikely Error") reports a failed GATT operation; the
+message alone does not identify whether firmware, controller/driver behavior,
+or stale discovery state caused it. `Service Discovery has not been performed
+yet` can follow when that session is lost. A successful Windows connection
+does not validate the Linux controller/BlueZ path. On Linux the app prefers a
+**direct BlueZ D-Bus transport**
 (`frostbay/transports.py`) that *attaches* to an already connected +
 `ServicesResolved` device and drives `FFE1` with direct `ReadValue` /
-`WriteValue`, instead of forcing a second user-space GATT connect (the
-model recommended in `specification.md`).
+`WriteValue` (the model recommended in `specification.md`). Both Bleak on
+Linux and this transport use BlueZ and the same BLE/GATT protocol; direct
+D-Bus cannot bypass a broken controller or force missing services to exist.
+An existing ready session is reused; a disconnected device still requires
+BlueZ connection/discovery. Version 0.5.1 also requires a successful initial
+state read before reporting connection success.
 
 If you still hit `0x0E`:
 
@@ -322,8 +328,10 @@ If you still hit `0x0E`:
    the desktop Bluetooth UI (GNOME/KDE) or `bluetoothctl connect <MAC>`,
    so BlueZ reports `Connected=true` + `ServicesResolved=true`. The app then
    attaches without re-triggering discovery.
-2. **Clear a stale bond/cache** from a previous dual-boot pairing:
-   `bluetoothctl remove <MAC>` → `sudo systemctl restart bluetooth` → re-pair.
+2. **Consider clearing a stale bond/cache** after collecting diagnostics:
+  `bluetoothctl remove <MAC>`, then scan and reconnect/re-pair. This removes
+  the Linux pairing for that device. Restarting Bluetooth, if needed, affects
+  all Bluetooth connections; do not remove other devices or the whole cache.
 3. **Use the adapter that exposes the full GATT tree.** The built-in `hci0`
    path was observed broken (UUID list collapses to battery/HID); an external
    USB BLE adapter (`hci1`) exposes the correct Frostbay tree. Check with
@@ -333,8 +341,42 @@ If you still hit `0x0E`:
 
 To force the classic bleak backend (e.g. to compare), construct the client
 with `FrostbayBLE(..., prefer_transport="bleak")`, or force the D-Bus path
-with `prefer_transport="bluez"`. Auto-selection is BlueZ-D-Bus on Linux,
-bleak elsewhere.
+with `prefer_transport="bluez"`. Auto-selection tries BlueZ D-Bus first and
+Bleak second on Linux, and Bleak only elsewhere.
+
+### `Characteristic ...ffe1... not found` in 0.5.0 (CachyOS / Linux)
+
+Version **0.5.1** fixes a deterministic application bug: the D-Bus
+characteristic resolver in 0.5.0 was never executed because it was async but
+called without `await`. This error was not evidence of an unsupported device
+or a missing proprietary handshake. Upgrade and restart the application.
+
+If 0.5.1 instead reports a timeout waiting for `ServicesResolved and FFE1`,
+collect the actual BlueZ state while the device is connected:
+
+```bash
+bluetoothctl list
+bluetoothctl info <MAC>
+busctl tree org.bluez
+journalctl -b -u bluetooth --no-pager -n 100
+```
+
+The error includes the chosen `/org/bluez/hciN/dev_...` path. Look for the
+FFE0 UUID and a GATT characteristic whose UUID is FFE1; `ServicesResolved`
+alone is insufficient. When several adapters already expose the device,
+0.5.1 prefers a connected/resolved instance with FFE1. If only a partial
+battery/HID tree appears, see the adapter-specific findings in
+[`specification.md`](specification.md). Physical CachyOS verification is
+still needed; automated tests use a simulated D-Bus connection.
+
+### Regression tests
+
+With dependencies installed, run from the repository root (no BLE hardware
+or desktop session required):
+
+```bash
+PYSTRAY_BACKEND=dummy .venv/bin/python -W error::RuntimeWarning -m unittest discover -s tests -v
+```
 
 ### Tray icon not visible on GNOME
 

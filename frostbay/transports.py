@@ -218,6 +218,8 @@ class BluezDbusTransport(Transport):
                 body=[interface, name],
             )
         )
+        if reply.message_type == self._dbus.MessageType.ERROR:
+            raise RuntimeError(f"BlueZ {name}: {reply.error_name}: {reply.body}")
         value = reply.body[0]
         # dbus_fast wraps typed values in Variant for "v" signatures.
         return getattr(value, "value", value)
@@ -256,14 +258,24 @@ class BluezDbusTransport(Transport):
                 candidates.append((path, dev))
         if not candidates:
             return None
-        # Prefer a connected / resolved instance if several adapters saw it.
         candidates.sort(
-            key=lambda c: (bool(c[1].get("ServicesResolved")), bool(c[1].get("Connected"))),
+            key=lambda candidate: (
+                bool(candidate[1].get("Connected"))
+                and bool(candidate[1].get("ServicesResolved"))
+                and any(
+                    path.startswith(candidate[0] + "/")
+                    and str(interfaces.get(GATT_CHARACTERISTIC_INTERFACE, {}).get("UUID", "")).lower()
+                    == UUID_FFE1.lower()
+                    for path, interfaces in objects.items()
+                ),
+                bool(candidate[1].get("Connected")),
+                bool(candidate[1].get("ServicesResolved")),
+            ),
             reverse=True,
         )
         return candidates[0][0]
 
-    async def _resolve_chars(self, device_path: str, objects: dict) -> None:
+    def _resolve_chars(self, device_path: str, objects: dict) -> None:
         self._char_paths = {}
         self._char_props = {}
         prefix = device_path + "/"
@@ -285,12 +297,15 @@ class BluezDbusTransport(Transport):
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while loop.time() < deadline:
-            try:
-                resolved = await self._get_prop(device_path, DEVICE_INTERFACE, "ServicesResolved")
-            except Exception:  # noqa: BLE001 - object may be mid-update
-                resolved = False
+            connected = await self._get_prop(device_path, DEVICE_INTERFACE, "Connected")
+            if not connected:
+                raise RuntimeError(f"BlueZ disconnected during GATT discovery on {device_path}")
+            resolved = await self._get_prop(device_path, DEVICE_INTERFACE, "ServicesResolved")
             if resolved:
-                return True
+                objects = await self._managed_objects()
+                self._resolve_chars(device_path, objects)
+                if self.has_characteristic(UUID_FFE1):
+                    return True
             await asyncio.sleep(0.1)
         return False
 
@@ -304,6 +319,20 @@ class BluezDbusTransport(Transport):
         try:
             interface_name, changed, _invalidated = message.body
         except (ValueError, TypeError):
+            return
+        if interface_name == DEVICE_INTERFACE and message.path == self._device_path:
+            unpacked = self._dbus.unpack_variants(dict(changed))
+            if (
+                unpacked.get("Connected") is False
+                or unpacked.get("ServicesResolved") is False
+                or "Connected" in _invalidated
+                or "ServicesResolved" in _invalidated
+            ):
+                self._connected = False
+                self._char_paths.clear()
+                self._char_props.clear()
+                self._notify_callbacks.clear()
+                logger.warning("BlueZ connection or GATT services lost on %s", self._device_path)
             return
         if interface_name != GATT_CHARACTERISTIC_INTERFACE:
             return
@@ -405,15 +434,11 @@ class BluezDbusTransport(Transport):
 
         if not await self._wait_services_resolved(device_path, timeout):
             raise RuntimeError(
-                "Timed out waiting for BlueZ ServicesResolved on "
-                f"{device_path}. Check adapter choice / pairing (see specification.md)."
+                "Timed out waiting for BlueZ ServicesResolved and FFE1 on "
+                f"{device_path}. BlueZ did not expose a usable Frostbay GATT tree; "
+                "check the adapter / device cache (see README.md)."
             )
 
-        # Re-read the tree now that services are resolved.
-        objects = await self._managed_objects()
-        self._resolve_chars(device_path, objects)
-        if UUID_FFE1.lower() not in self._char_paths:
-            raise RuntimeError(f"Characteristic {UUID_FFE1} not found on the device")
         self._connected = True
         logger.info("Attached to BlueZ device %s (FFE1 resolved)", device_path)
 

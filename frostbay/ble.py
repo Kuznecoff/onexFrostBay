@@ -178,6 +178,9 @@ class FrostbayBLE:
                     self._transport = transport
                     self._resolve_chars()
                     self._connected = True
+                    await self.refresh_state()
+                    if not self.is_connected:
+                        raise RuntimeError("Device disconnected during initial state read")
                     last_exc = None
                     connected_ok = True
                     logger.info("Connected to Frostbay at %s (via %s)", addr, backend)
@@ -205,11 +208,6 @@ class FrostbayBLE:
         if not connected_ok and last_exc is not None:
             raise last_exc
 
-        # Initial state read + notification subscription.
-        try:
-            await self.refresh_state()
-        except Exception as exc:
-            logger.warning("Initial state read failed: %s", exc)
         try:
             await self._start_notifications()
         except Exception as exc:

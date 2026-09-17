@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-17
+
+### Fixed
+
+- **Linux BlueZ connections no longer always fail with FFE1 not found.**
+  The 0.5.0 characteristic resolver was an async function called without
+  awaiting it, so the characteristic map stayed empty even for a working
+  adapter. It is now synchronous, matching its work and call site.
+- BlueZ readiness now requires both an active, services-resolved connection
+  and an actual FFE1 characteristic. Delayed characteristic publication is
+  retried within the discovery timeout. When multiple adapters already see
+  the device, a connected, resolved instance exposing FFE1 is preferred.
+- BlueZ disconnect/service-loss signals invalidate connection state and cached
+  characteristics. Property-read errors are reported instead of being mistaken
+  for truthy connection flags.
+- A failed initial state read now fails the connection attempt and enters the
+  existing cleanup/retry path, instead of reporting a successful connection
+  without telemetry.
+
+### Notes
+
+- Linux retains direct BlueZ D-Bus as the preferred transport and Bleak as a
+  fallback. Windows/macOS retain Bleak. The Frostbay GATT UUIDs and command
+  format are unchanged.
+- Added mocked D-Bus and connection regression tests. Physical CachyOS/device
+  validation is still required; this does not claim to fix controller/firmware
+  causes of ATT error 0x0E.
+
 ## [0.5.0] - 2026-09-16
 
 ### Added
