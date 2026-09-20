@@ -19,8 +19,8 @@ Tested targets: **Windows 10/11**, **macOS**, **Fedora Linux**.
   - 🔴 red    — disconnected / connection error
   - ⚪ grey   — idle / scanning
   - 🟠 orange — error
-- BLE scanning via `bleak`; connections prefer direct BlueZ D-Bus on Linux
-  and use Bleak on Windows/macOS, with retries for connection/initial-read errors
+- BLE scanning and connections via `bleak` (the legacy 0.4.1 protocol path),
+  with retries for connection/initial-read errors
 - **Automatic device discovery** by advertised name substring `ONEC1`
   (e.g. `CoolingSystem_ONEC1`). On startup the app scans for a device whose
   name contains `ONEC1` (case-insensitive) and connects to the first match.
@@ -45,7 +45,7 @@ Tested targets: **Windows 10/11**, **macOS**, **Fedora Linux**.
   - **Turn OFF**
   - **Smart Fan**: `silent`, `soft`, `strong` presets
   - **Manual settings**: a preset list of fixed fan/pump pairs, e.g.
-    `Fan/Pump:20-60 … Fan/Pump:40-90` (each applies both values at once; the
+    `Fan/Pump:20-60 … Fan/Pump:100-100` (each applies both values at once; the
     current one is checked in the menu)
 - **Auto-restart on stop** (menu checkbox): when the pump stops on its own while
   the device is in an active mode (Smart or Fixed), the app re-applies that
@@ -97,7 +97,24 @@ full tray control surface in the terminal — scan / find & connect / connect
 by address / disconnect / refresh / OFF / Smart (silent/soft/strong) /
 **Auto-restart on stop** / **Auto temp** toggles / manual fan-pump presets /
 set pump — plus a live dashboard (Fan/Pump progress bars and Temp IN/OUT,
-Flow, Fan, Pump sparklines), host CPU/GPU telemetry and an event log.
+Flow, Fan, Pump sparklines with fixed scales and current/min/max labels), host
+CPU/GPU telemetry and an event log.
+
+The toolbox remembers its settings: the connected device address and the
+automation switch states (auto-restart, auto temp, BLE error log) are saved
+to `~/.config/frostbay/config.json` (override with `FROSTBAY_CONFIG`) and
+restored on the next launch.
+
+**Auto temp** in the toolbox supports up to 5 temperature steps: each step
+has its own ON °C threshold and mode (Smart or fixed fan/pump, including
+`20-40` and `20-50`), edited in the settings panel. The first step is
+required; extra steps can be removed with the `[X]` button in the top-right
+corner of each panel. While a step is active the ON command is re-sent
+every 2 s (fire-and-forget, serialized — no queue builds up), so a pump
+that stalls on a low water flow recovers without waiting for a stopped
+reading. The step count, temperatures and modes are persisted to the
+config. The left-menu manual preset list is trimmed to `20-60`, `30-70`,
+`50-80`, `100-100`.
 
 Run it directly:
 
@@ -210,7 +227,7 @@ presets, fixed fan, and pump control.
 - **Auto temp >50°C / <45°C** — checkbox, see [Features](#features)
 - **Manual settings** — preset list:
   `Fan/Pump:20-60`, `20-70`, `20-80`, `30-60`, `30-70`, `30-80`,
-  `40-70`, `40-80`, `40-90` (✓ marks the currently active pair)
+  `40-70`, `40-80`, `40-90`, `100-100` (✓ marks the currently active pair)
 - **Exit**
 
 ## Project layout
@@ -237,6 +254,7 @@ onexFrostBay/
     ├── __main__.py           # entry point for `python -m frostbay`
     ├── protocol.py           # FFE1 state blob parser + command builders
     ├── ble.py                # bleak-based cross-platform BLE client + auto-polling
+    ├── config.py             # JSON settings (~/.config/frostbay/config.json)
     ├── history.py            # ring-buffer telemetry history for graphs
     ├── host.py               # host CPU/GPU temperature & load telemetry
     ├── dashboard.py          # live curses/text dashboard with sparkline graphs
@@ -247,11 +265,11 @@ onexFrostBay/
 
 ## Implementation notes
 
-- GATT access goes through a small transport abstraction (`frostbay/transports.py`):
-  a `BleakTransport` (WinRT / CoreBluetooth / BlueZ) and a `BluezDbusTransport`
-  that attaches to an already resolved BlueZ device and performs direct
-  `ReadValue` / `WriteValue` on `FFE1`. On Linux the D-Bus transport is used
-  when available (avoids the fresh-connect ATT `0x0E` drop); otherwise bleak.
+- GATT access goes through `BleakTransport` (`frostbay/transports.py`), the
+  legacy 0.4.1 protocol path: a fresh `BleakClient` connect scoped to the
+  `FFE0` primary service (WinRT / CoreBluetooth / BlueZ). On Linux it prefers
+  an already connected + `ServicesResolved` BlueZ device exposing `FFE1`,
+  preserving its adapter and avoiding an implicit scan.
 - The `FFE1` characteristic is read as a 64-byte state blob and parsed per
   `specification.md`.
 - Writes are never a single 64-byte write; the protocol splits the patched
@@ -311,16 +329,14 @@ ATT error `0x0E` ("Unlikely Error") reports a failed GATT operation; the
 message alone does not identify whether firmware, controller/driver behavior,
 or stale discovery state caused it. `Service Discovery has not been performed
 yet` can follow when that session is lost. A successful Windows connection
-does not validate the Linux controller/BlueZ path. On Linux the app prefers a
-**direct BlueZ D-Bus transport**
-(`frostbay/transports.py`) that *attaches* to an already connected +
-`ServicesResolved` device and drives `FFE1` with direct `ReadValue` /
-`WriteValue` (the model recommended in `specification.md`). Both Bleak on
-Linux and this transport use BlueZ and the same BLE/GATT protocol; direct
-D-Bus cannot bypass a broken controller or force missing services to exist.
+does not validate the Linux controller/BlueZ path. On Linux the app prefers
+an already connected + `ServicesResolved` BlueZ device exposing `FFE1`
+(see `frostbay/transports.py`), preserving its adapter and avoiding an
+implicit scan. Bleak on Linux uses BlueZ and the same BLE/GATT protocol;
+it cannot bypass a broken controller or force missing services to exist.
 An existing ready session is reused; a disconnected device still requires
-BlueZ connection/discovery. Version 0.5.1 also requires a successful initial
-state read before reporting connection success.
+BlueZ connection/discovery. A successful initial state read is required
+before reporting connection success.
 
 If you still hit `0x0E`:
 
@@ -339,20 +355,9 @@ If you still hit `0x0E`:
 4. **Neutralize the bogus HID** (`1812`) volume-key side effect via the
    `hwdb` override in `specification.md` (does not affect the GATT path).
 
-To force the classic bleak backend (e.g. to compare), construct the client
-with `FrostbayBLE(..., prefer_transport="bleak")`, or force the D-Bus path
-with `prefer_transport="bluez"`. Auto-selection tries BlueZ D-Bus first and
-Bleak second on Linux, and Bleak only elsewhere.
-
-### `Characteristic ...ffe1... not found` in 0.5.0 (CachyOS / Linux)
-
-Version **0.5.1** fixes a deterministic application bug: the D-Bus
-characteristic resolver in 0.5.0 was never executed because it was async but
-called without `await`. This error was not evidence of an unsupported device
-or a missing proprietary handshake. Upgrade and restart the application.
-
-If 0.5.1 instead reports a timeout waiting for `ServicesResolved and FFE1`,
-collect the actual BlueZ state while the device is connected:
+If the app reports a timeout waiting for a connected, services-resolved
+device exposing `FFE1`, collect the actual BlueZ state while the device is
+connected:
 
 ```bash
 bluetoothctl list
@@ -361,13 +366,10 @@ busctl tree org.bluez
 journalctl -b -u bluetooth --no-pager -n 100
 ```
 
-The error includes the chosen `/org/bluez/hciN/dev_...` path. Look for the
-FFE0 UUID and a GATT characteristic whose UUID is FFE1; `ServicesResolved`
-alone is insufficient. When several adapters already expose the device,
-0.5.1 prefers a connected/resolved instance with FFE1. If only a partial
-battery/HID tree appears, see the adapter-specific findings in
-[`specification.md`](specification.md). Physical CachyOS verification is
-still needed; automated tests use a simulated D-Bus connection.
+Look for the FFE0 UUID and a GATT characteristic whose UUID is FFE1;
+`ServicesResolved` alone is insufficient. If only a partial battery/HID
+tree appears, see the adapter-specific findings in
+[`specification.md`](specification.md).
 
 ### Regression tests
 

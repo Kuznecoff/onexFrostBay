@@ -656,6 +656,7 @@ class FrostbayTrayApp:
         (20, 60), (20, 70), (20, 80),
         (30, 60), (30, 70), (30, 80),
         (40, 70), (40, 80), (40, 90),
+        (100, 100),
     )
 
     def _build_preset_menu(self) -> pystray.Menu:

@@ -31,37 +31,61 @@ python main.py
 
 This app reuses the core Frostbay BLE protocol implementation from the main project, but it does not depend on any system tray backend.
 
-## Textual Connection Modes
+## Textual Connection Behavior
 
-The Textual dashboard launched by `./frostbay-toolbox/run.sh` has a
-**Legacy 0.4.1 (Bleak)** switch in **CONNECTION**:
+The Textual dashboard launched by `./frostbay-toolbox/run.sh` uses the
+legacy 0.4.1 protocol path: Bleak with FFE0-scoped discovery.
 
-- Off (default): automatic transport selection, direct BlueZ first on Linux
-	with Bleak as fallback.
-- On: Bleak only, with FFE0-scoped discovery as in version 0.4.1.
-
-Changing modes disconnects the current session and clears its telemetry.
-Use **Connect** or **Find & connect** afterwards. The selection lasts for the
-current application session. To start in legacy mode:
-
-```bash
-./frostbay-toolbox/run.sh --legacy-041
-```
-
-The Frostbay command format is unchanged from 0.4.1; this option selects the
-older connection backend, retaining the current connection checks and fixes.
-
-On Linux, legacy mode first looks for an already connected BlueZ device with
-resolved services and FFE1, and passes that device's adapter path to Bleak.
-Otherwise it uses Bleak's normal scan/connect flow. Reads and writes remain
-on Bleak in both cases; Windows behavior is unchanged. The FFE0 filter does
-not limit BlueZ's over-the-air service discovery.
+On Linux it first looks for an already connected BlueZ device with resolved
+services and FFE1, and passes that device's adapter path to Bleak.
+Otherwise it uses Bleak's normal scan/connect flow. Windows behavior is
+unchanged. The FFE0 filter does not limit BlueZ's over-the-air service
+discovery.
 
 Connection attempts can take up to four minutes including retries. A timeout
 cancels the operation and waits for cleanup before another action runs.
 If `GATT Protocol Error: Unlikely Error` (0x0E) persists, try connecting the
-device through the Linux Bluetooth settings before starting legacy mode.
-This requires BlueZ to expose FFE1; the application cannot use an incomplete
-service tree. Capture `bluetoothctl info <address>` and
+device through the Linux Bluetooth settings first. This requires BlueZ to
+expose FFE1; the application cannot use an incomplete service tree. Capture
+`bluetoothctl info <address>` and
 `journalctl -u bluetooth -b --since "5 minutes ago" --no-pager` after a failure
 to distinguish discovery/adapter problems from application errors.
+
+## Settings Persistence
+
+The Textual dashboard saves its settings to
+`~/.config/frostbay/config.json` (override the location with the
+`FROSTBAY_CONFIG` environment variable):
+
+- `deviceUUID` — the address of the last successfully connected device,
+  used as the default address on the next launch
+- `auto_restart` — Auto-restart on stop switch
+- `auto_temp` — Auto temp switch
+- `ble_log` — Show BLE errors in log switch
+- `thermal_off_c` — Auto temp OFF threshold
+- `thermal_stages` — the list of thermal steps (`on_c` + `mode`), so the
+  step count, temperatures and modes survive restarts
+
+The address is saved on every successful connect; switch changes are saved
+immediately. Missing or corrupt config falls back to the defaults.
+
+## Thermal Stage Editor
+
+The settings panel lets you configure up to 5 auto-temp steps. Each step
+panel shows its ON °C input and a mode select (Smart presets plus fixed
+fan/pump pairs, including `20-40` and `20-50`), and a `[X]` delete button
+in the top-right corner. The first step is required and cannot be deleted.
+
+While a step is active, the ON command is re-sent every 2 seconds
+regardless of the reported running state (fire-and-forget), so a pump
+that stalls on a low water flow recovers immediately. Commands are
+executed sequentially under the BLE operation lock: at most one command is
+in flight, so a slow device delays the next send instead of building a
+queue.
+
+## Dashboard Sparklines
+
+Each dashboard sparkline has a label with the current value and the
+min/max over the recorded window. Temp IN/OUT use a fixed 25–50 °C scale
+so small variations stay visible; Flow, Fan and Pump auto-scale to their
+data.

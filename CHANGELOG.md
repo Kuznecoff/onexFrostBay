@@ -5,7 +5,58 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-09-20
+
+### Added
+
+- **Thermal stage editor** in the Toolbox settings: up to 5 temperature
+  steps, each with its own ON °C threshold and mode (Smart or fixed
+  fan/pump). Every stage panel has a `[X]` delete button in its top-right
+  corner; the first step is required and its button is disabled.
+- **Fire-and-forget thermal resend**: while a thermal step is active the
+  ON command is re-issued every 2 s regardless of the reported running
+  state, so a pump that stalls on a low water flow recovers without
+  waiting for a stopped reading. Commands run sequentially under the BLE
+  operation lock, so at most one command is in flight and no queue can
+  build up if the device is slow.
+- Extra fixed presets in the thermal mode list: `Fan/Pump 20-40` and
+  `Fan/Pump 20-50`.
+- **Toolbox settings persistence** (`frostbay/config.py`): the device address
+  and the automation switch states (auto-restart, auto temp, BLE error log)
+  are saved to `~/.config/frostbay/config.json` (override with the
+  `FROSTBAY_CONFIG` env var) and restored on the next launch. The address is
+  saved on every successful connect; switch changes save immediately.
+- **Fixed-scale sparklines** in the Toolbox dashboard: Temp IN/OUT are pinned
+  to a 25–50 °C scale so small variations stay readable, and every sparkline
+  gets a label with the current / min / max values, the scale and the window
+  length.
+
+### Changed
+
+- The Toolbox left-menu manual preset list is trimmed to `20-60`, `30-70`,
+  `50-80`, `100-100` (the tray app keeps its full list).
+
+### Removed
+
+- The direct BlueZ D-Bus transport and automatic transport selection
+  (introduced in 0.5.0). The app now speaks only the legacy 0.4.1 Bleak
+  protocol: a `BleakClient` connect scoped to `FFE0`, preferring an already
+  connected + services-resolved BlueZ device exposing `FFE1` on Linux.
+- Toolbox **Legacy 0.4.1 (Bleak)** switch and `--legacy-041` launch option;
+  with a single protocol there is nothing to switch between.
+- `FrostbayBLE(..., prefer_transport=...)`; the client always uses Bleak.
+
+### Fixed
+
+- `thermal_stages` was dropped on every launch: the key was missing from the
+  config defaults, so saved steps (count, temperatures, modes) were not
+  restored after a restart.
+
+### Notes
+
+- The device command format is unchanged. All connection checks and fixes
+  from 0.5.1–0.5.3 (initial-read validation, ready-device preference,
+  retry/cleanup) are retained on the Bleak path.
 
 ## [0.5.3] - 2026-09-17
 
@@ -208,7 +259,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live auto-refresh polling and a live dashboard with unicode sparkline graphs.
 - Console controller (`--no-tray`) for headless environments.
 
-[Unreleased]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.5.3...HEAD
 [0.4.1]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Kuznecoff/onexFrostBay/compare/v0.3.0...v0.3.1

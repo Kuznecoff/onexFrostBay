@@ -26,7 +26,7 @@ except ImportError as exc:  # pragma: no cover - import guard
         "bleak is required: pip install bleak"
     ) from exc
 
-from .transports import Transport, backend_order, create_transport
+from .transports import BleakTransport, Transport
 
 from .protocol import (
     FrostbayState,
@@ -72,10 +72,8 @@ class FrostbayBLE:
         self,
         address: Optional[str] = None,
         on_state: Optional[Callable[[FrostbayState], None]] = None,
-        prefer_transport: Optional[str] = None,
     ) -> None:
         self._address = address
-        self._prefer_transport = prefer_transport
         self._transport: Optional[Transport] = None
         self._on_state = on_state
         self._lock = asyncio.Lock()
@@ -160,67 +158,54 @@ class FrostbayBLE:
 
         last_exc: Optional[Exception] = None
         connected_ok = False
-        for backend in backend_order(self._prefer_transport):
-            for attempt in range(1, max(1, attempts) + 1):
-                transport: Optional[Transport] = None
+        for attempt in range(1, max(1, attempts) + 1):
+            transport: Optional[Transport] = None
+            try:
+                logger.info("Connecting to %s (attempt %d/%d) ...", addr, attempt, attempts)
+                # Legacy 0.4.1 protocol path: Bleak with FFE0-scoped discovery.
+                transport = BleakTransport()
+                await transport.connect(addr, timeout)
+                self._transport = transport
+                self._resolve_chars()
+                self._connected = True
+                await self.refresh_state()
+                if not self.is_connected:
+                    raise RuntimeError("Device disconnected during initial state read")
                 try:
-                    logger.info(
-                        "Connecting to %s via %s (attempt %d/%d) ...",
-                        addr, backend, attempt, attempts,
-                    )
-                    # On Linux the "bluez" backend attaches to an already
-                    # connected + resolved device and drives FFE1 via direct
-                    # D-Bus ReadValue/WriteValue, avoiding the fresh connect +
-                    # full ATT discovery the Frostbay firmware can reject with
-                    # an Unlikely Error (0x0E). "bleak" is the classic client.
-                    transport = create_transport(backend)
-                    await transport.connect(addr, timeout)
-                    self._transport = transport
-                    self._resolve_chars()
-                    self._connected = True
-                    await self.refresh_state()
-                    if not self.is_connected:
-                        raise RuntimeError("Device disconnected during initial state read")
-                    try:
-                        await self._start_notifications()
-                    except Exception as exc:
-                        logger.warning("Notification subscription failed: %s", exc)
-                    if not self.is_connected:
-                        raise RuntimeError("Device disconnected during notification setup")
-                    last_exc = None
-                    connected_ok = True
-                    logger.info("Connected to Frostbay at %s (via %s)", addr, backend)
-                    break
-                except asyncio.CancelledError:
-                    if transport is not None:
-                        try:
-                            await transport.disconnect()
-                        except Exception as exc:
-                            logger.debug("Cancelled connection cleanup failed: %s", exc)
-                    self._transport = None
-                    self._connected = False
-                    self._notify_started = False
-                    raise
+                    await self._start_notifications()
                 except Exception as exc:
-                    last_exc = exc
-                    logger.warning(
-                        "Connect via %s attempt %d/%d failed: %s",
-                        backend, attempt, attempts, exc,
-                    )
-                    # Tear down any half-open link so the stack does not keep a
-                    # stale connection that blocks the next Connect call.
-                    if transport is not None:
-                        try:
-                            await transport.disconnect()
-                        except Exception:
-                            pass
-                    self._transport = None
-                    self._connected = False
-                    self._notify_started = False
-                    if attempt < attempts:
-                        await asyncio.sleep(0.6)
-            if connected_ok:
+                    logger.warning("Notification subscription failed: %s", exc)
+                if not self.is_connected:
+                    raise RuntimeError("Device disconnected during notification setup")
+                last_exc = None
+                connected_ok = True
+                logger.info("Connected to Frostbay at %s", addr)
                 break
+            except asyncio.CancelledError:
+                if transport is not None:
+                    try:
+                        await transport.disconnect()
+                    except Exception as exc:
+                        logger.debug("Cancelled connection cleanup failed: %s", exc)
+                self._transport = None
+                self._connected = False
+                self._notify_started = False
+                raise
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("Connect attempt %d/%d failed: %s", attempt, attempts, exc)
+                # Tear down any half-open link so the stack does not keep a
+                # stale connection that blocks the next Connect call.
+                if transport is not None:
+                    try:
+                        await transport.disconnect()
+                    except Exception:
+                        pass
+                self._transport = None
+                self._connected = False
+                self._notify_started = False
+                if attempt < attempts:
+                    await asyncio.sleep(0.6)
 
         if not connected_ok and last_exc is not None:
             raise last_exc
