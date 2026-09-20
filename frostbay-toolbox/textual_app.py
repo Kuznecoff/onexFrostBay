@@ -784,7 +784,6 @@ class FrostbayTextualApp(App):
                 yield Button(f"Find & connect (*{FROSTBAY_NAME_PART}*)", id="find")
                 yield Button("Connect", id="connect_addr")
                 yield Button("Disconnect", id="disconnect")
-                yield Button("Refresh state", id="refresh")
 
                 yield Static("COOLING", classes="section-title")
                 yield Button("Turn OFF", id="off")
@@ -977,7 +976,7 @@ class FrostbayTextualApp(App):
 
         connected = self.ble.is_connected
         for bid in ("off", "smart_silent", "smart_soft", "smart_strong",
-                   "refresh", "disconnect", "apply_pump"):
+                   "disconnect", "apply_pump"):
             try:
                 self.query_one(f"#{bid}", Button).disabled = not connected
             except Exception:

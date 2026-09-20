@@ -94,7 +94,7 @@ extension if the tray icon does not appear (KDE works out of the box).
 [Textual](https://github.com/Textualize/textual), styled with an orange
 theme (rounded orange borders, orange gauges and sparklines). It exposes the
 full tray control surface in the terminal — scan / find & connect / connect
-by address / disconnect / refresh / OFF / Smart (silent/soft/strong) /
+by address / disconnect / OFF / Smart (silent/soft/strong) /
 **Auto-restart on stop** / **Auto temp** toggles / manual fan-pump presets /
 set pump — plus a live dashboard (Fan/Pump progress bars and Temp IN/OUT,
 Flow, Fan, Pump sparklines with fixed scales and current/min/max labels), host
