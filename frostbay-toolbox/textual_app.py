@@ -81,7 +81,7 @@ SMART_PRESETS: tuple[str, ...] = ("silent", "soft", "strong")
 THERMAL_MODE_OPTIONS: dict[str, tuple[str, str]] = {
     **{f"smart_{p}": ("SMART", f"Smart: {p.capitalize()}") for p in SMART_PRESETS},
     **{f"fixed_{f}_{p}": ("FIXED", f"Fan/Pump {f}-{p}")
-       for f, p in MANUAL_PRESETS + THERMAL_EXTRA_PRESETS},
+       for f, p in sorted(MANUAL_PRESETS + THERMAL_EXTRA_PRESETS, key=lambda fp: (fp[1], fp[0]))},
 }
 
 # (title, History series key, value format, fixed scale low/high or None) per sparkline.

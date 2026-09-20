@@ -75,7 +75,8 @@ immediately. Missing or corrupt config falls back to the defaults.
 
 The settings panel lets you configure up to 5 auto-temp steps. Each step
 panel shows its ON °C input and a mode select (Smart presets plus fixed
-fan/pump pairs, including `20-40` and `20-50`), and a `[X]` delete button
+fan/pump pairs, including `20-40` and `20-50`, sorted weakest to
+strongest with Smart modes first), and a `[X]` delete button
 in the top-right corner. The first step is required and cannot be deleted.
 
 While a step is active, the ON command is re-sent according to the
