@@ -63,6 +63,8 @@ The Textual dashboard saves its settings to
 - `auto_temp` — Auto temp switch
 - `ble_log` — Show BLE errors in log switch
 - `thermal_off_c` — Auto temp OFF threshold
+- `thermal_resend` — Auto temp resend policy: `1s`, `2s` (default) or
+  `on_stop`
 - `thermal_stages` — the list of thermal steps (`on_c` + `mode`), so the
   step count, temperatures and modes survive restarts
 
@@ -76,12 +78,14 @@ panel shows its ON °C input and a mode select (Smart presets plus fixed
 fan/pump pairs, including `20-40` and `20-50`), and a `[X]` delete button
 in the top-right corner. The first step is required and cannot be deleted.
 
-While a step is active, the ON command is re-sent every 2 seconds
-regardless of the reported running state (fire-and-forget), so a pump
-that stalls on a low water flow recovers immediately. Commands are
-executed sequentially under the BLE operation lock: at most one command is
-in flight, so a slow device delays the next send instead of building a
-queue.
+While a step is active, the ON command is re-sent according to the
+**RESEND** policy selected in settings: every 1 s, every 2 s (default,
+fire-and-forget) or the legacy `On stop (wait)` mode which only re-sends
+when the device reports it stopped. In the timed modes a pump that stalls
+on a low water flow recovers immediately without waiting for a stopped
+reading. Commands are executed sequentially under the BLE operation lock:
+at most one command is in flight, so a slow device delays the next send
+instead of building a queue.
 
 ## Dashboard Sparklines
 

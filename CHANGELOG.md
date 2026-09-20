@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-09-20
+
+### Added
+
+- **Resend policy** setting for Auto temp in the Toolbox settings panel
+  (`thermal_resend` in the config): three options — re-send the ON command
+  every 1 s, every 2 s (default), or the legacy wait-for-stop behavior
+  (only re-send when the device reports it stopped). The selection is
+  persisted and restored on the next launch.
+
 ## [0.6.0] - 2026-09-20
 
 ### Added

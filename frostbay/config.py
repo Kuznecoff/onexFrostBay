@@ -21,6 +21,7 @@ DEFAULTS: dict[str, Any] = {
     "thermal_on_c": 50.0,
     "thermal_off_c": 45.0,
     "thermal_mode": "smart_silent",
+    "thermal_resend": "2s",
     "thermal_stages": None,
 }
 

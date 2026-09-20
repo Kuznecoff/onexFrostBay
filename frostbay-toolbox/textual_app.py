@@ -55,10 +55,17 @@ AUTO_RESTART_COOLDOWN_SEC = 1.0
 STARTUP_GRACE_SEC = 10.0
 THERMAL_ON_C = 50.0
 THERMAL_OFF_C = 45.0
-# Fire-and-forget resend interval while a thermal stage is active: the ON command
-# is re-issued every N seconds regardless of the reported running state, so a
-# pump that stalls on low flow recovers without waiting for a stopped reading.
-THERMAL_RESEND_SEC = 2.0
+# Thermal resend policy while a stage is active:
+#  "1s"/"2s"  - fire-and-forget: re-issue the ON command every N seconds
+#               regardless of the reported running state.
+#  "on_stop"  - legacy: only resend when the device reports it stopped.
+THERMAL_RESEND_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("Every 1s", "1s"),
+    ("Every 2s", "2s"),
+    ("On stop (wait)", "on_stop"),
+)
+THERMAL_RESEND_INTERVALS: dict[str, float] = {"1s": 1.0, "2s": 2.0}
+THERMAL_RESEND_DEFAULT = "2s"
 
 MANUAL_PRESETS: tuple[tuple[int, int], ...] = (
     (20, 60), (30, 70), (50, 80), (100, 100),
@@ -437,6 +444,8 @@ class FrostbayTextualApp(App):
         self.thermal_stages = self._load_thermal_stages()
         self._thermal_active_mode: Optional[str] = None
         self._last_thermal_send_ts = 0.0
+        resend = str(self.config.get("thermal_resend", THERMAL_RESEND_DEFAULT))
+        self.thermal_resend = resend if resend in ("1s", "2s", "on_stop") else THERMAL_RESEND_DEFAULT
         self.ble_log_enabled = bool(self.config.get("ble_log", True))
         self.auto_connect_enabled = bool(self.config.get("auto_connect", False))
         self._last_auto_restart_ts = 0.0
@@ -719,8 +728,16 @@ class FrostbayTextualApp(App):
                 return
             desired = stage["mode"]
             now = time.monotonic()
-            if (desired != self._thermal_active_mode
-                    or now - self._last_thermal_send_ts >= THERMAL_RESEND_SEC):
+            if self.thermal_resend == "on_stop":
+                state = self._run_async(self.ble.read_state())
+                self.state = state
+                self.history.push(state)
+                resend = desired != self._thermal_active_mode or not state.is_running()
+            else:
+                interval = THERMAL_RESEND_INTERVALS[self.thermal_resend]
+                resend = (desired != self._thermal_active_mode
+                         or now - self._last_thermal_send_ts >= interval)
+            if resend:
                 self.state = self._run_async(self._apply_thermal_mode(desired))
                 self.history.push(self.state)
                 self._thermal_active_mode = desired
@@ -832,6 +849,13 @@ class FrostbayTextualApp(App):
                 with Horizontal(classes="input-row"):
                     yield Static("OFF °C", classes="field-label")
                     yield Input(value=f"{self.thermal_off_c:g}", placeholder="25-75", id="thermal_off_input")
+                with Horizontal(classes="input-row"):
+                    yield Static("RESEND", classes="field-label")
+                    yield Select(
+                        list(THERMAL_RESEND_OPTIONS),
+                        value=self.thermal_resend,
+                        id="thermal_resend_select",
+                    )
                 with Vertical(id="thermal_stages_box"):
                     pass
                 yield Button("ADD MODE BY TEMP STEP", id="add_thermal_stage")
@@ -1073,6 +1097,21 @@ class FrostbayTextualApp(App):
 
     def on_select_changed(self, event: Select.Changed) -> None:
         sid = event.select.id or ""
+        if sid == "thermal_resend_select":
+            if event.value is None or event.value is Select.BLANK:
+                return
+            mode = str(event.value)
+            if mode not in ("1s", "2s", "on_stop") or mode == self.thermal_resend:
+                return
+            self.thermal_resend = mode
+            self.config["thermal_resend"] = mode
+            try:
+                save_config(self.config)
+            except OSError as exc:
+                self._log(f"Config save failed: {exc}")
+            label = next(lbl for lbl, val in THERMAL_RESEND_OPTIONS if val == mode)
+            self._log(f"Thermal resend: {label}")
+            return
         if not sid.startswith("stage_mode_") or event.value is None:
             return
         try:

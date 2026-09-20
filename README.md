@@ -109,12 +109,14 @@ restored on the next launch.
 has its own ON °C threshold and mode (Smart or fixed fan/pump, including
 `20-40` and `20-50`), edited in the settings panel. The first step is
 required; extra steps can be removed with the `[X]` button in the top-right
-corner of each panel. While a step is active the ON command is re-sent
-every 2 s (fire-and-forget, serialized — no queue builds up), so a pump
-that stalls on a low water flow recovers without waiting for a stopped
-reading. The step count, temperatures and modes are persisted to the
-config. The left-menu manual preset list is trimmed to `20-60`, `30-70`,
-`50-80`, `100-100`.
+corner of each panel. The resend policy is configurable in settings:
+re-send the ON command every 1 s, every 2 s (default, fire-and-forget,
+serialized — no queue builds up), or the legacy wait-for-stop behavior
+(re-send immediately when the device reports it stopped). A pump that
+stalls on a low water flow recovers without waiting for a stopped reading
+in the timed modes. The step count, temperatures and modes are persisted
+to the config. The left-menu manual preset list is trimmed to `20-60`,
+`30-70`, `50-80`, `100-100`.
 
 Run it directly:
 
