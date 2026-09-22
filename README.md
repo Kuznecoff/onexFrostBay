@@ -14,6 +14,13 @@ and sends control commands — all from the terminal.
 
 Tested on **CachyOS** (Arch-based).
 
+## Disclaimer
+
+This software is provided for experimental and educational use. The author
+accepts no responsibility for any damage. By using this program you assume
+all risks and take full responsibility yourself, as it may damage your main
+device or the liquid cooling system. Use at your own risk.
+
 ---
 
 ## Features
