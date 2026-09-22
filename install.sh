@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Frostbay installer for Fedora (also works on other RPM distros with dnf).
+# Frostbay installer for CachyOS (Arch-based; also works on other pacman distros).
 #
 # Does everything a user would do manually:
-#   1. installs system packages (bluez, python tooling, GNOME tray support)
+#   1. installs system packages (bluez, python tooling)
 #   2. creates the Python venv and installs dependencies
-#   3. adds a "Frostbay" entry to the applications menu
+#   3. adds a "Frostbay" entry to the applications menu (opens the TUI in a terminal)
 #   4. optionally enables autostart on login
 #
 # Usage:
@@ -30,15 +30,12 @@ if [ "$(id -u)" = "0" ]; then
     exit 1
 fi
 
-# 1. System packages. gnome-shell-extension-appindicator only matters on GNOME
-#    (KDE has a native tray); dnf ignores it if the package set disallows it.
+# 1. System packages.
 echo "[frostbay] Installing system packages (sudo)..."
-if command -v dnf >/dev/null 2>&1; then
-    sudo dnf install -y python3 python3-pip bluez git \
-        gnome-shell-extension-appindicator || \
-    sudo dnf install -y python3 python3-pip bluez git
+if command -v pacman >/dev/null 2>&1; then
+    sudo pacman -S --needed --noconfirm python python-pip bluez bluez-utils git
 else
-    echo "[frostbay] dnf not found - install python3, pip, bluez manually." >&2
+    echo "[frostbay] pacman not found - install python, pip, bluez, bluez-utils manually." >&2
 fi
 
 # Make sure the Bluetooth daemon is running.
@@ -61,8 +58,8 @@ Comment=Frostbay BLE cooling controller
 Exec=$PROJECT_DIR/run.sh
 Path=$PROJECT_DIR
 Icon=$PROJECT_DIR/frostbay/icon.png
-Terminal=false
-Categories=System;HardwareSettings;
+Terminal=true
+Categories=System;HardwareSettings;TerminalEmulator;
 EOF
 update-desktop-database ~/.local/share/applications >/dev/null 2>&1 || true
 
@@ -84,6 +81,4 @@ fi
 
 echo ""
 echo "[frostbay] Done! Start with:  ./run.sh"
-echo "[frostbay] Or find 'Frostbay' in the applications menu."
-echo "[frostbay] GNOME users: enable the 'AppIndicator and KStatusNotifierItem'"
-echo "[frostbay] support extension (then re-login) if the tray icon is missing."
+echo "[frostbay] Or find 'Frostbay' in the applications menu (opens a terminal)."

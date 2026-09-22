@@ -2,7 +2,7 @@
 # Frostbay Toolbox installer (terminal / Textual TUI).
 #
 # Sets up everything a terminal user needs:
-#   1. system packages (python3, pip, bluez) via dnf or apt-get
+#   1. system packages (python3, pip, bluez) via pacman, dnf or apt-get
 #   2. the Python virtual environment + dependencies (incl. Textual)
 #   3. a `frostbay-toolbox` launcher in ~/.local/bin
 #   4. an applications-menu entry that opens the TUI in a terminal
@@ -41,7 +41,9 @@ fi
 # 1. System packages. bluez is required for BLE on Linux; python3 + pip for the
 #    venv. Tolerates a missing optional package by retrying a minimal set.
 echo "[frostbay-toolbox] Installing system packages (sudo)..."
-if command -v dnf >/dev/null 2>&1; then
+if command -v pacman >/dev/null 2>&1; then
+    sudo pacman -S --needed --noconfirm python python-pip bluez bluez-utils git
+elif command -v dnf >/dev/null 2>&1; then
     sudo dnf install -y python3 python3-pip bluez git || \
     sudo dnf install -y python3 python3-pip bluez
 elif command -v apt-get >/dev/null 2>&1; then
@@ -49,7 +51,7 @@ elif command -v apt-get >/dev/null 2>&1; then
     sudo apt-get install -y python3 python3-venv python3-pip bluez git || \
     sudo apt-get install -y python3 python3-venv python3-pip bluez
 else
-    echo "[frostbay-toolbox] No dnf/apt-get found - install python3, pip, bluez manually." >&2
+    echo "[frostbay-toolbox] No pacman/dnf/apt-get found - install python3, pip, bluez manually." >&2
 fi
 
 # Make sure the Bluetooth daemon is running.

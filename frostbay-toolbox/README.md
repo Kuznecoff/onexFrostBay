@@ -1,35 +1,39 @@
-# Frostbay terminal TUI
+# Frostbay terminal TUI (Toolbox)
 
-This is the Linux-first, terminal-only version of Frostbay.
+This is the terminal-only version of Frostbay, built with
+[Textual](https://github.com/Textualize/textual).
 
-It intentionally avoids any tray or desktop integration and uses the Python standard library `curses` module for a keyboard- and mouse-driven TUI.
+It intentionally avoids any tray or desktop integration and runs entirely in
+the terminal with a keyboard- and mouse-driven UI.
 
 ## Launch
 
 From the repository root:
 
 ```bash
-python frostbay-toolbox/main.py
+./run.sh
 ```
 
 Or:
 
 ```bash
 cd frostbay-toolbox
-python main.py
+./run.sh
 ```
 
 ## Features
 
 - No `pystray` / tray / app-indicator dependency
 - Terminal-only usage for headless or heavily loaded Linux systems
-- Mouse support in the menu: click an action to trigger it
-- Keyboard navigation: arrow keys, `j`/`k`, Enter, `q`
+- Mouse support in the UI: click actions to trigger them
+- Keyboard navigation and hotkeys (e.g. `r` to refresh state)
 - BLE connect / scan / read / command interface for the Frostbay device
+- Live dashboard with sparklines, progress bars and host CPU/GPU telemetry
 
 ## Notes
 
-This app reuses the core Frostbay BLE protocol implementation from the main project, but it does not depend on any system tray backend.
+This app reuses the core Frostbay BLE protocol implementation from the main
+project (`frostbay/`), but it does not depend on any system tray backend.
 
 ## Textual Connection Behavior
 
@@ -38,8 +42,8 @@ legacy 0.4.1 protocol path: Bleak with FFE0-scoped discovery.
 
 On Linux it first looks for an already connected BlueZ device with resolved
 services and FFE1, and passes that device's adapter path to Bleak.
-Otherwise it uses Bleak's normal scan/connect flow. Windows behavior is
-unchanged. The FFE0 filter does not limit BlueZ's over-the-air service
+Otherwise it uses Bleak's normal scan/connect flow. The FFE0 filter does not
+limit BlueZ's over-the-air service
 discovery.
 
 Connection attempts can take up to four minutes including retries. A timeout

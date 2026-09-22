@@ -5,9 +5,8 @@
 # then starts the app. Every later run just starts the app.
 #
 # Usage:
-#   ./run.sh                 # tray app with auto-discovery (ONEC1)
+#   ./run.sh                 # Textual TUI with auto-discovery (ONEC1)
 #   ./run.sh --address MAC   # connect to a known device
-#   ./run.sh --no-tray       # console mode
 set -euo pipefail
 
 cd "$(dirname "$0")"

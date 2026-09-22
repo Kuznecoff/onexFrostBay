@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-22
+
+### Removed
+
+- **System-tray version** of the app (`pystray` tray icon, tray menu, tray
+  tooltip, `--no-tray` console fallback and the curses/text live dashboard).
+  The Textual terminal Toolbox is now the only interface.
+- Legacy curses TUI (`frostbay-toolbox/main.py`); the Textual TUI replaces it.
+- `pystray` and `Pillow` dependencies.
+
+### Changed
+
+- `python -m frostbay` and the root `run.sh` / `install.sh` now launch the
+  Textual TUI; the desktop menu entry opens it in a terminal
+  (`Terminal=true`) and no longer installs the GNOME AppIndicator extension.
+- Installers now target **CachyOS / Arch** via `pacman`
+  (`python python-pip bluez bluez-utils git`); the Fedora/`dnf` path is gone
+  from the docs and the root installer. The toolbox installer gained a
+  `pacman` branch ahead of `dnf`/`apt-get`.
+- README rewritten fully in English and repositioned as the FrostBay liquid
+  cooling control app for the **OneXPlayer Super X**, tested on CachyOS;
+  all Windows/macOS references removed.
+
 ## [0.6.3] - 2026-09-20
 
 ### Changed

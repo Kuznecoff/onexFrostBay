@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Uninstall Frostbay Toolbox: launcher, applications-menu entry and autostart.
 #
-# By default the shared Python virtual environment is left untouched (the main
-# tray app uses the same venv). Pass --purge to remove it as well.
+# By default the shared Python virtual environment is left untouched (the root
+# project launcher uses the same venv). Pass --purge to remove it as well.
 #
 # Usage:
 #   ./uninstall.sh            # remove launcher + menu entry + autostart
@@ -41,7 +41,7 @@ if [ "$PURGE" = "yes" ]; then
     rm -rf "$VENV_DIR"
 else
     echo "[frostbay-toolbox] Kept virtual environment ($VENV_DIR)."
-    echo "[frostbay-toolbox] It is shared with the tray app; use --purge to delete it."
+    echo "[frostbay-toolbox] It is shared with the project launcher; use --purge to delete it."
 fi
 
 echo "[frostbay-toolbox] Uninstalled."

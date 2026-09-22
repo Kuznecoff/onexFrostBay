@@ -1,6 +1,6 @@
-"""Frostbay BLE tray application package."""
+"""Frostbay BLE core package (used by the Textual terminal Toolbox)."""
 
-__version__ = "0.6.3"
+__version__ = "0.7.0"
 
 from .protocol import (
     FrostbayState,
@@ -13,10 +13,6 @@ from .protocol import (
 )
 from .ble import FrostbayBLE, ScanResult, FROSTBAY_NAME_PART, is_frostbay_name
 from .history import History, Sample
-from .icons import IconState, render_icon
-from .app import FrostbayTrayApp, main
-from .console import FrostbayConsole, run_console
-from .dashboard import run_dashboard, render_once
 
 __all__ = [
     "__version__",
@@ -33,12 +29,4 @@ __all__ = [
     "is_frostbay_name",
     "History",
     "Sample",
-    "IconState",
-    "render_icon",
-    "FrostbayTrayApp",
-    "main",
-    "FrostbayConsole",
-    "run_console",
-    "run_dashboard",
-    "render_once",
 ]
