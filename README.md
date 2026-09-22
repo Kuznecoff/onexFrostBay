@@ -14,6 +14,10 @@ and sends control commands — all from the terminal.
 
 Tested on **CachyOS** (Arch-based).
 
+<p align="center">
+  <img src="frostbay-toolbox.gif" alt="Animated walkthrough of the Frostbay terminal TUI" width="960">
+</p>
+
 ## Disclaimer
 
 This software is provided for experimental and educational use. The author
