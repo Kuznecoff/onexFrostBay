@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-11-08
+
+### Added
+
+- Extra fixed fan/pump presets in the thermal stage mode list: `0-30`,
+  `0-40`, `0-50`, `30-80` and `30-100`, alongside the existing `20-40` and
+  `20-50`. As before they are offered only in the Auto temp mode select and
+  are not added to the sidebar manual preset buttons.
+
 ## [0.7.0] - 2026-09-22
 
 ### Removed
