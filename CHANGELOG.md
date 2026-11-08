@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-11-08
+
+### Added
+
+- **Pump keep-alive.** While the app is connected it now re-issues the last
+  active mode every 2 s. The device firmware stops the pump a few seconds
+  after the last `FFE1` *write* as soon as a central stays connected (it
+  treats a read-only controller as dead), which is why a mode used to die
+  5-7 s after each button press while the pump kept spinning happily during a
+  full host freeze, when no connection existed at all. Re-writing the same
+  blob is a no-op for the device and re-arms the watchdog. Connecting also
+  adopts a mode the device is already running, so a pump left spinning by a
+  previous session or a crash is taken over instead of being dropped.
+  Toggleable in Settings ("Keep-alive"), persisted as `keepalive`.
+
+### Fixed
+
+- `FrostbayState.is_running()` no longer relies solely on the documented
+  activity byte `state[12]`: live firmware keeps it `0x00` while the pump
+  clearly runs, so auto-restart never saw a running→stopped transition and
+  never fired. The flow word is now used as a fallback (running when
+  flow > 5 mL/min).
+
 ## [0.8.1] - 2026-11-08
 
 ### Added

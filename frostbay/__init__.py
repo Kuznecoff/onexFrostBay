@@ -1,6 +1,6 @@
 """Frostbay BLE core package (used by the Textual terminal Toolbox)."""
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 
 from .protocol import (
     FrostbayState,

@@ -15,6 +15,7 @@ from typing import Any
 DEFAULTS: dict[str, Any] = {
     "deviceUUID": "C8:17:17:F5:C8:63",
     "auto_restart": True,
+    "keepalive": True,
     "ble_log": True,
     "auto_temp": False,
     "auto_connect": False,

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -30,6 +31,7 @@ from .transports import BleakTransport, Transport
 
 from .protocol import (
     FrostbayState,
+    Mode,
     UUID_FFE1,
     UUID_FFE4,
     READBACK_DELAY_SEC,
@@ -47,6 +49,15 @@ logger = logging.getLogger("frostbay.ble")
 # The device advertises names like "CoolingSystem_ONEC1", so we match on
 # the case-insensitive substring "ONEC1".
 FROSTBAY_NAME_PART = "ONEC1"
+
+# Firmware watchdog: while a BLE central stays connected, the device stops the
+# pump a few seconds after the last FFE1 *write* -- it treats a controller app
+# that only reads telemetry as dead. Re-issuing the last active state blob at
+# this interval keeps the pump running for as long as the app is connected.
+KEEPALIVE_INTERVAL_SEC = 2.0
+
+# How often the keep-alive task wakes up to check whether a re-write is due.
+KEEPALIVE_TICK_SEC = 0.5
 
 
 def is_frostbay_name(name: str) -> bool:
@@ -90,6 +101,17 @@ class FrostbayBLE:
         self._poll_task: Optional[asyncio.Task] = None
         self._poll_interval = 2.0
         self._poll_stop: Optional[asyncio.Event] = None
+        # Keep-alive: periodically re-issue the last active state blob so the
+        # firmware watchdog does not stop the pump while we stay connected.
+        self.keepalive_enabled = True
+        self.keepalive_interval = KEEPALIVE_INTERVAL_SEC
+        self._keepalive_task: Optional[asyncio.Task] = None
+        self._keepalive_stop: Optional[asyncio.Event] = None
+        # Monotonic time of the last successful FFE1 write (any writer).
+        self._last_write_ts = 0.0
+        # Last non-OFF state blob written/adopted; None means nothing to keep
+        # alive (device is OFF or never commanded).
+        self._last_active_state: Optional[bytearray] = None
 
     # --- status ---------------------------------------------------------
     @property
@@ -168,7 +190,8 @@ class FrostbayBLE:
                 self._transport = transport
                 self._resolve_chars()
                 self._connected = True
-                await self.refresh_state()
+                initial = await self.refresh_state()
+                self._adopt_active_state(initial)
                 if not self.is_connected:
                     raise RuntimeError("Device disconnected during initial state read")
                 try:
@@ -216,7 +239,18 @@ class FrostbayBLE:
         except Exception as exc:
             logger.warning("Auto-polling start failed: %s", exc)
 
+        # Arm the keep-alive so the firmware watchdog does not stop a running
+        # pump a few seconds after the last write.
+        try:
+            await self.start_keepalive(interval=self.keepalive_interval)
+        except Exception as exc:
+            logger.warning("Keep-alive start failed: %s", exc)
+
     async def disconnect(self) -> None:
+        try:
+            await self.stop_keepalive()
+        except Exception:
+            pass
         try:
             await self.stop_polling()
         except Exception:
@@ -340,6 +374,14 @@ class FrostbayBLE:
                 self._write_with_response = not self._write_with_response
             if idx < len(chunks) - 1:
                 await asyncio.sleep(WRITE_DELAY_SEC)
+        # Any successful write re-arms the device watchdog, so both the
+        # keep-alive loop and the "did someone else just write?" check key off
+        # this timestamp instead of duplicating writes.
+        self._last_write_ts = time.monotonic()
+        mode_byte = state[4] if len(state) > 4 else 0
+        self._last_active_state = (
+            None if Mode.from_byte(mode_byte) is Mode.OFF else bytearray(state)
+        )
         await asyncio.sleep(READBACK_DELAY_SEC)
 
     async def write_state(self, state: bytearray) -> None:
@@ -386,6 +428,72 @@ class FrostbayBLE:
                 logger.debug("Poll tick error: %s", exc)
             try:
                 await asyncio.wait_for(self._poll_stop.wait(), timeout=self._poll_interval)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
+    # --- keep-alive -----------------------------------------------------
+    def _adopt_active_state(self, state: FrostbayState) -> None:
+        """Take over a mode the device is already running.
+
+        The device keeps its last mode across reconnects (and across a host
+        crash, when no watchdog was armed at all). Re-issuing that same blob is
+        a no-op for the device but re-arms the keep-alive, so a pump that was
+        already spinning keeps spinning once this client connects.
+        """
+        if state is None or state.mode is Mode.OFF:
+            self._last_active_state = None
+        else:
+            self._last_active_state = bytearray(state.raw)
+            self._last_write_ts = 0.0  # make the first keep-alive write immediate
+
+    @property
+    def keepalive_running(self) -> bool:
+        return self._keepalive_task is not None and not self._keepalive_task.done()
+
+    async def start_keepalive(self, interval: Optional[float] = None) -> None:
+        """Start re-issuing the last active state while a mode is running.
+
+        The loop is a no-op while the device is OFF, while
+        ``keepalive_enabled`` is False, or while another writer (a button
+        press, a thermal resend) has written within the interval.
+        """
+        await self.stop_keepalive()
+        if interval is not None:
+            self.keepalive_interval = float(interval)
+        self._keepalive_stop = asyncio.Event()
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+        logger.info("Keep-alive armed (%.1fs)", self.keepalive_interval)
+
+    async def stop_keepalive(self) -> None:
+        if self._keepalive_stop is not None:
+            self._keepalive_stop.set()
+        if self._keepalive_task is not None:
+            self._keepalive_task.cancel()
+            try:
+                await self._keepalive_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._keepalive_task = None
+        self._keepalive_stop = None
+        logger.debug("Keep-alive stopped")
+
+    async def _keepalive_loop(self) -> None:
+        assert self._keepalive_stop is not None
+        while not self._keepalive_stop.is_set():
+            try:
+                due = time.monotonic() - self._last_write_ts >= self.keepalive_interval
+                if (self.keepalive_enabled and due and self.is_connected
+                        and self._last_active_state is not None):
+                    blob = bytearray(self._last_active_state)
+                    async with self._lock:
+                        await self._write_state_locked(blob)
+                    logger.debug("Keep-alive re-write (mode=0x%02X)", blob[4])
+            except Exception as exc:
+                logger.debug("Keep-alive tick error: %s", exc)
+            try:
+                await asyncio.wait_for(self._keepalive_stop.wait(), timeout=KEEPALIVE_TICK_SEC)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:

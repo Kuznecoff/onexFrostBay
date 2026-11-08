@@ -451,6 +451,10 @@ class FrostbayTextualApp(App):
         self.thermal_resend = resend if resend in ("1s", "2s", "on_stop") else THERMAL_RESEND_DEFAULT
         self.ble_log_enabled = bool(self.config.get("ble_log", True))
         self.auto_connect_enabled = bool(self.config.get("auto_connect", False))
+        # The device stops the pump a few seconds after the last write while
+        # connected, so the client must keep re-issuing the active mode.
+        self.keepalive_enabled = bool(self.config.get("keepalive", True))
+        self.ble.keepalive_enabled = self.keepalive_enabled
         self._last_auto_restart_ts = 0.0
         # Monotonic timestamp of the last active-mode command (user or auto).
         # Drives the startup grace window in _maybe_auto_restart.
@@ -580,6 +584,13 @@ class FrostbayTextualApp(App):
         except OSError as exc:
             self._log(f"Config save failed: {exc}")
 
+    def _log_keepalive(self) -> None:
+        """Say what the keep-alive will do, right after a successful connect."""
+        if self.keepalive_enabled:
+            self._log(f"Keep-alive armed: re-sending mode every {self.ble.keepalive_interval:g}s")
+        else:
+            self._log("Keep-alive OFF: the device stops the pump a few seconds after each command")
+
     def _do_find_connect(self) -> None:
         found = self._run_async(self.ble.find_and_connect(timeout=10.0), timeout=240.0)
         self.address = found.address
@@ -587,6 +598,7 @@ class FrostbayTextualApp(App):
         self.devices = []
         self._refresh_state()
         self._log(f"Connected to {found.name} ({found.address})")
+        self._log_keepalive()
         self.status = "Connected"
 
     def _do_auto_connect(self) -> None:
@@ -598,6 +610,7 @@ class FrostbayTextualApp(App):
                 self.devices = []
                 self._refresh_state()
                 self._log(f"Auto-connected to {addr}")
+                self._log_keepalive()
                 self.status = "Connected"
                 return
             except Exception as exc:
@@ -615,6 +628,7 @@ class FrostbayTextualApp(App):
         self.devices = []
         self._refresh_state()
         self._log(f"Connected to {addr}")
+        self._log_keepalive()
         self.status = "Connected"
 
     def _do_disconnect(self) -> None:
@@ -842,6 +856,9 @@ class FrostbayTextualApp(App):
                     yield Switch(value=self.auto_restart_enabled, id="auto_restart")
                     yield Static("Auto-restart on stop")
                 with Horizontal(classes="switch-row"):
+                    yield Switch(value=self.keepalive_enabled, id="keepalive")
+                    yield Static("Keep-alive: re-send mode every 2s")
+                with Horizontal(classes="switch-row"):
                     yield Switch(value=self.ble_log_enabled, id="ble_log")
                     yield Static("Show BLE errors in log")
                 yield Static("DEVICE UUID", classes="section-title")
@@ -923,6 +940,8 @@ class FrostbayTextualApp(App):
             fan_val = pump_val = 0
         else:
             running = "[green]RUNNING[/green]" if s.is_running() else "[red]STOPPED[/red]"
+            ka = ("[green]on[/green]" if (self.keepalive_enabled and self.ble.keepalive_running)
+                  else "[dim]off[/dim]")
             status_text = "\n".join([
                 f"Mode:      [bold]{s.mode.label}[/bold]",
                 f"Running:   {running}",
@@ -931,6 +950,7 @@ class FrostbayTextualApp(App):
                 f"Flow:      {s.flow_ml_min:.1f} mL/min",
                 f"Temp in:   {s.temp_in_c}°C",
                 f"Temp out:  {s.temp_out_c}°C",
+                f"Keepalive: {ka} ({self.ble.keepalive_interval:g}s)",
                 f"Protocol:  0x{s.protocol_version:02X}",
             ])
             fan_val = s.fan_percent
@@ -1138,6 +1158,11 @@ class FrostbayTextualApp(App):
             self.ble_log_enabled = event.value
             self.config["ble_log"] = event.value
             self._set_ble_logging(event.value)
+        elif event.switch.id == "keepalive":
+            self.keepalive_enabled = event.value
+            self.config["keepalive"] = event.value
+            self.ble.keepalive_enabled = event.value
+            self._log(f"Keep-alive {'enabled' if event.value else 'disabled'}")
         elif event.switch.id == "auto_connect":
             self.auto_connect_enabled = event.value
             self.config["auto_connect"] = event.value

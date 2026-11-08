@@ -103,8 +103,13 @@ class FrostbayState:
         return s
 
     def is_running(self) -> bool:
-        """Best runtime ON/OFF indicator per spec: state[12] != 0."""
-        return self.activity_running
+        """Best runtime ON/OFF indicator.
+
+        ``state[12]`` is the documented activity byte, but live devices were
+        observed keeping it ``0x00`` while the pump clearly ran; the flow word
+        is the reliable fallback (0.0 when stopped, tens of mL/min running).
+        """
+        return self.activity_running or self.flow_ml_min > 5.0
 
     def summary(self) -> str:
         lines = [

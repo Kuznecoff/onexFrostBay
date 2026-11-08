@@ -37,7 +37,8 @@ device or the liquid cooling system. Use at your own risk.
   You can still pass `--address <MAC>` to skip discovery.
 - Reads the current Frostbay state from `FFE1`:
   - mode (OFF / Smart Fan / Fixed Fan)
-  - runtime running indicator (`state[12]`)
+  - runtime running indicator (`state[12]`, with a flow-rate fallback when
+    the firmware leaves that byte at `0x00`)
   - fan percentage
   - flow rate (mL/min, decoded from `state[6..7]`)
   - pump percentage
@@ -55,6 +56,14 @@ device or the liquid cooling system. Use at your own risk.
   - **Manual settings**: a preset list of fixed fan/pump pairs
     (`20-60`, `30-70`, `50-80`, `100-100`)
   - **Set pump** to an explicit value
+- **Pump keep-alive** (switch, on by default): the firmware stops the pump a
+  few seconds after the last `FFE1` write while a BLE central stays connected,
+  because a controller that only reads telemetry looks dead to it. The app
+  therefore re-issues the last active mode every 2 s for as long as it is
+  connected, and takes over a mode the device is already running when it
+  connects (for example a pump left spinning after a host crash). A deliberate
+  OFF is never re-sent, and a manual or thermal command resets the timer, so
+  no duplicate traffic is added while something else is already writing.
 - **Auto-restart on stop** (switch): when the pump stops on its own while
   the device is in an active mode (Smart or Fixed), the app re-applies that
   mode's settings to wake it back up. To avoid disrupting a fresh start it
