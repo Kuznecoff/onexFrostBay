@@ -74,6 +74,7 @@ MANUAL_PRESETS: tuple[tuple[int, int], ...] = (
 # Extra fixed presets available only in thermal auto-on mode list.
 THERMAL_EXTRA_PRESETS: tuple[tuple[int, int], ...] = (
     (0, 30), (0, 40), (0, 50),
+    (10, 30), (10, 40), (10, 50),
     (20, 40), (20, 50),
     (30, 80), (30, 100),
 )

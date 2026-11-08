@@ -80,7 +80,8 @@ immediately. Missing or corrupt config falls back to the defaults.
 The settings panel lets you configure up to 5 auto-temp steps. Each step
 panel shows its ON °C input and a mode select (Smart presets plus fixed
 fan/pump pairs, including the thermal-only `0-30`, `0-40`, `0-50`,
-`20-40`, `20-50`, `30-80` and `30-100`, sorted weakest to
+`10-30`, `10-40`, `10-50`, `20-40`, `20-50`, `30-80` and `30-100`,
+sorted weakest to
 strongest with Smart modes first), and a `[X]` delete button
 in the top-right corner. The first step is required and cannot be deleted.
 
